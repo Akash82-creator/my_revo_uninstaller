@@ -41,6 +41,8 @@ pub enum PathError {
     ReservedName,
     #[error("component is empty after trimming trailing dots/spaces")]
     InvalidComponent,
+    #[error("name would be changed by Win32 normalization (e.g. trailing dot or space)")]
+    NonCanonicalName,
 }
 
 /// A normalized, local, drive-absolute Windows path.
@@ -193,6 +195,10 @@ impl WinPath {
             return Err(PathError::InvalidChar);
         }
         match validate_component(name)? {
+            // An enumerated name must be used exactly. Win32 normalization
+            // (trailing dots/spaces) would silently address a different
+            // entry, e.g. `data.` -> `data`.
+            Some(c) if c != name => Err(PathError::NonCanonicalName),
             Some(c) => {
                 let mut components = self.components.clone();
                 components.push(c);
@@ -326,6 +332,18 @@ mod tests {
         assert_eq!(p("C:\\ÄPFEL"), p("C:\\äpfel"));
         // ß has no single-char uppercase; it only equals itself.
         assert_ne!(p("C:\\straße"), p("C:\\STRASSE"));
+    }
+
+    #[test]
+    fn join_rejects_names_changed_by_normalization() {
+        let base = p("C:\\a");
+        assert_eq!(base.join("data."), Err(PathError::NonCanonicalName));
+        assert_eq!(base.join("data "), Err(PathError::NonCanonicalName));
+        assert_eq!(base.join("data. ."), Err(PathError::NonCanonicalName));
+        assert!(base.join(".").is_err());
+        assert!(base.join("").is_err());
+        assert_eq!(base.join("data").unwrap(), p("C:\\a\\data"));
+        assert_eq!(base.join(".hidden").unwrap(), p("C:\\a\\.hidden"), "leading dots are exact");
     }
 
     #[test]

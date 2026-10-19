@@ -56,6 +56,9 @@ export interface OpView {
   opId: string;
   programId: string;
   programName: string;
+  /** Program and launch details captured when the uninstaller started. */
+  program: Program;
+  launch: Preview;
   state: 'ready' | 'launching' | 'running' | 'verifying' | 'finished';
   pids: number[];
   trackingIncomplete: boolean;

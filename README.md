@@ -67,10 +67,10 @@ The GNU cross-build puts `WebView2Loader.dll` next to `sweep.exe`; ship both.
 
 | Suite | Environment | Status |
 |---|---|---|
-| `sweep-core` unit and acceptance tests (57) | Linux, fakes with Windows semantics | **Run: 57 passed** |
+| `sweep-core` unit and acceptance tests (60) | Linux, fakes with Windows semantics | **Run: 60 passed** |
 | Workspace type-check for `x86_64-pc-windows-gnu` | Linux + mingw | **Run: 0 warnings, 0 errors** |
 | UI type-check (`svelte-check`) and build | Linux | **Run: 0 errors, 0 warnings** |
-| UI smoke tests (4) | Linux headless Chromium, **mocked** backend | **Run: 4 passed** (the 2 navigation tests fail against the pre-fix UI) |
+| UI smoke tests (5) | Linux headless Chromium, **mocked** backend | **Run: 5 passed** (the 3 operation-navigation tests fail against the pre-fix UI) |
 | `stage_a_windows` (9) | **Wine** on Linux (not Windows) | **Run: 6 passed, 3 failed.** All 3 failures are the junction tests: Wine's `mklink /J` can't create junctions. Not Windows evidence. |
 | `stage_a_windows` (9) | Windows CI (`windows-latest`) | Runs on every push and PR; see the Actions tab |
 | VM suite (`tests/vm`) | Disposable Windows VMs | **Planned**, not run |
@@ -99,8 +99,10 @@ The GNU cross-build puts `WebView2Loader.dll` next to `sweep.exe`; ship both.
 - **Known limitations:**
   - Registry values containing 8.3 short names (`PROGRA~1`) are not expanded,
     so they don't count as evidence. This is safe but can miss ownership.
-  - On-disk names with trailing dots or spaces can't be examined (Win32
-    normalisation). They are reported as coverage gaps.
+  - On-disk names with trailing dots or spaces (e.g. `data.`) can't be
+    examined through Win32 paths. Sweep never normalizes an enumerated name:
+    such entries are reported as coverage gaps instead of being confused
+    with a sibling (`data`).
   - Paths whose resolved location differs from the requested one (because
     an ancestor is a junction, symlink or mount point, or the path uses 8.3
     short names) are reported as "resolves elsewhere" gaps. They are not

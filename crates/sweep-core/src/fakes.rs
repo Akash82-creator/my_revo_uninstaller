@@ -21,6 +21,9 @@ type Hook = Box<dyn FnMut(&WinPath, &FakeFs) + Send>;
 pub struct FakeFs {
     nodes: Mutex<BTreeMap<String, (WinPath, EntryMeta, Option<String>)>>,
     denied: Mutex<BTreeSet<String>>,
+    /// Extra listing entries whose exact names cannot be a `WinPath`
+    /// (e.g. `data.`), keyed by parent directory.
+    raw: Mutex<BTreeMap<String, Vec<DirEntry>>>,
     /// Hook run before every read_dir (used to cancel mid-scan in tests).
     pub on_read_dir: Mutex<Option<Hook>>,
     /// Hook run after every successful read_dir listing (used to change the
@@ -78,6 +81,13 @@ impl FakeFs {
     /// Its previous children stay in the map but become unreachable.
     pub fn replace_with_junction(&self, path: &str, target: &str) {
         self.junction_to(path, target);
+    }
+
+    /// Add a directory entry with an exact on-disk name that Win32 path
+    /// normalization would change (trailing dot or space).
+    pub fn raw_entry(&mut self, parent: &str, name: &str, meta: EntryMeta) -> &mut Self {
+        self.raw.lock().unwrap().entry(wp(parent).key()).or_default().push(DirEntry { name: name.into(), meta });
+        self
     }
 
     pub fn deny(&mut self, path: &str) -> &mut Self {
@@ -138,7 +148,7 @@ impl FsRead for FakeFs {
         if meta.is_reparse {
             return Err(FsError::Other("refusing to list through a reparse point".into()));
         }
-        let list = self
+        let mut list: Vec<DirEntry> = self
             .nodes
             .lock()
             .unwrap()
@@ -146,6 +156,7 @@ impl FsRead for FakeFs {
             .filter(|(p, _, _)| p.parent().as_ref() == Some(path))
             .map(|(p, m, _)| DirEntry { name: p.file_name().unwrap().to_string(), meta: m.clone() })
             .collect();
+        list.extend(self.raw.lock().unwrap().get(&path.key()).cloned().unwrap_or_default());
         self.run_hook(&self.after_read_dir, path);
         Ok(list)
     }
