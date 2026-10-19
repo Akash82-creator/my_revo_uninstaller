@@ -13,15 +13,25 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
+use sweep_core::api::FsRead;
 use sweep_core::evidence::{take_snapshot, Ownership, SnapshotEnv, Verdict};
 use sweep_core::inventory::{build_inventory, read_entries, Inventory};
 use sweep_core::launch::{plan_launch, Verb};
 use sweep_core::outcome::{Outcome, UninstallState, UnknownReason};
 use sweep_core::scan::{CancelToken, CoverageStatus, ScanOptions, ScanReport, Scanner};
+use sweep_core::winpath::WinPath;
 use sweep_win::flow::run_vendor_uninstall;
 use sweep_win::fs::WinFs;
 use sweep_win::known::known_folders;
 use sweep_win::registry::WinReg;
+
+/// %TEMP% resolved to its long path. CI runners use an 8.3 short TEMP
+/// (C:\Users\RUNNER~1\...), which Sweep reports as "resolves elsewhere".
+fn temp_dir() -> PathBuf {
+    let p = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let s = p.to_string_lossy();
+    PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
+}
 
 fn fixture() -> PathBuf {
     PathBuf::from(std::env::var("SWEEP_FIXTURE").expect("set SWEEP_FIXTURE to target\\debug\\sweep-fixture.exe"))
@@ -34,6 +44,7 @@ fn unique(tag: &str) -> String {
 struct Installed {
     name: String,
     publisher: String,
+    root: Option<String>,
 }
 
 impl Installed {
@@ -44,7 +55,8 @@ impl Installed {
             .status()
             .unwrap();
         assert!(st.success());
-        Installed { name: name.into(), publisher: publisher.into() }
+        let root = extra.iter().position(|a| *a == "--install-root").map(|i| extra[i + 1].to_string());
+        Installed { name: name.into(), publisher: publisher.into(), root }
     }
 }
 
@@ -52,6 +64,9 @@ impl Drop for Installed {
     fn drop(&mut self) {
         // Test-fixture cleanup only (not Sweep functionality).
         let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join(&self.publisher);
+        if let Some(root) = &self.root {
+            let _ = std::fs::remove_dir_all(PathBuf::from(root).join(&self.publisher));
+        }
         let roaming = PathBuf::from(std::env::var("APPDATA").unwrap()).join(&self.publisher);
         let _ = std::fs::remove_dir_all(local.join(&self.name));
         let _ = std::fs::remove_dir_all(roaming.join(&self.name));
@@ -74,6 +89,10 @@ fn inventory() -> Inventory {
 }
 
 fn uninstall_and_scan(name: &str) -> (UninstallState, ScanReport) {
+    uninstall_and_scan_opts(name, false)
+}
+
+fn uninstall_and_scan_opts(name: &str, stop_immediately: bool) -> (UninstallState, ScanReport) {
     let inv = inventory();
     let prog = inv.programs.iter().find(|p| p.display_name == name).expect("fixture in inventory");
     let known = known_folders();
@@ -85,7 +104,7 @@ fn uninstall_and_scan(name: &str) -> (UninstallState, ScanReport) {
     // sweep-core; here we exercise the launch/track/verify flow itself.
     let plan = plan_launch(&cmd, prog.scope, false, None, known.system32.as_ref()).unwrap();
     assert_eq!(plan.verb, Verb::Open, "per-user fixture never uses runas");
-    let state = run_vendor_uninstall(&snap, &plan, &AtomicBool::new(false), |_| {});
+    let state = run_vendor_uninstall(&snap, &plan, &AtomicBool::new(stop_immediately), |_| {});
     let scanner = Scanner {
         snap: &snap,
         known: &known,
@@ -181,7 +200,7 @@ fn shared_publisher_two_products() {
 #[test]
 #[ignore = "Windows CI: requires SWEEP_FIXTURE"]
 fn junction_in_installdir_not_followed() {
-    let sentinel = std::env::temp_dir().join(unique("Sentinel"));
+    let sentinel = temp_dir().join(unique("Sentinel"));
     std::fs::create_dir_all(&sentinel).unwrap();
     std::fs::write(sentinel.join("precious.docx"), b"keep").unwrap();
     let name = unique("Junction");
@@ -193,4 +212,74 @@ fn junction_in_installdir_not_followed() {
     assert_eq!(dir.stats.as_ref().unwrap().document_like, 0, "did not descend into the junction");
     assert_eq!(std::fs::read(sentinel.join("precious.docx")).unwrap(), b"keep");
     let _ = std::fs::remove_dir_all(&sentinel);
+}
+
+#[test]
+#[ignore = "Windows CI: requires SWEEP_FIXTURE"]
+fn stop_waiting_never_confirms_success() {
+    // The parent exits at once and a child keeps working; the user stops
+    // waiting immediately. The result must not be a confirmed success.
+    let name = unique("Stop");
+    let _g = Installed::new(&name, "SweepPubStop", "spawn-child", &[]);
+    let (s, _) = uninstall_and_scan_opts(&name, true);
+    let o = outcome(&s);
+    assert!(matches!(o, Outcome::Unknown(_)), "{o:?}");
+    assert!(!o.auto_scan_allowed());
+    // Let the detached child finish before cleanup.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+}
+
+fn mklink_junction(link: &std::path::Path, target: &std::path::Path) {
+    let st = Command::new("cmd")
+        .args(["/C", "mklink", "/J", link.to_str().unwrap(), target.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(st.success(), "mklink /J failed");
+}
+
+#[test]
+#[ignore = "Windows CI: requires SWEEP_FIXTURE"]
+fn ancestor_junction_is_not_followed() {
+    // Install through an alias: <temp>\Alias -> <temp>\Real. The install
+    // folder itself is a normal directory, but its ancestor is a junction.
+    let base = temp_dir().join(unique("Anc"));
+    let real = base.join("Real");
+    let alias = base.join("Alias");
+    std::fs::create_dir_all(&real).unwrap();
+    mklink_junction(&alias, &real);
+    let name = unique("AncApp");
+    let publisher = "SweepPubAnc";
+    let _g = Installed::new(&name, publisher, "ok", &["--install-root", alias.to_str().unwrap()]);
+
+    // Direct check of the filesystem layer.
+    let through = WinPath::from_api(&alias.join(publisher).join(&name).to_string_lossy()).unwrap();
+    assert!(matches!(WinFs.metadata(&through), Err(sweep_core::api::FsError::Redirected(_))));
+    assert!(matches!(WinFs.read_dir(&through), Err(sweep_core::api::FsError::Redirected(_))));
+
+    let (_, report) = uninstall_and_scan(&name);
+    assert!(report.candidates.iter().all(|c| !c.ownership.contains(&Ownership::IsInstallDir)));
+    assert!(report.coverage.iter().any(|c| matches!(c.status, CoverageStatus::Redirected(_))));
+    assert!(!report.complete);
+    let _ = std::fs::remove_dir(&alias);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+#[ignore = "Windows CI: requires SWEEP_FIXTURE"]
+fn directory_replaced_by_junction_is_not_listed_through() {
+    let base = temp_dir().join(unique("Swap"));
+    let dir = base.join("dir");
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("secret.docx"), b"x").unwrap();
+    let p = WinPath::from_api(&dir.to_string_lossy()).unwrap();
+    assert!(WinFs.read_dir(&p).unwrap().is_empty());
+    std::fs::remove_dir(&dir).unwrap();
+    mklink_junction(&dir, &elsewhere);
+    // Now `dir` is a junction: never listed through.
+    assert!(WinFs.metadata(&p).unwrap().is_reparse);
+    assert!(WinFs.read_dir(&p).is_err());
+    let _ = std::fs::remove_dir(&dir);
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -12,6 +12,7 @@
     "allow-start-uninstall",
     "allow-stop-waiting",
     "allow-get-operation",
+    "allow-list-operations",
     "allow-start-scan",
     "allow-cancel-scan",
     "allow-get-scan"

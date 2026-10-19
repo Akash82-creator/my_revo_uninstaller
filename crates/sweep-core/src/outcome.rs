@@ -6,6 +6,8 @@
 //! requires an explicit, acknowledged, read-only scan. Sweep's own cleanup is
 //! disabled in Stage A regardless of outcome.
 
+use crate::api::{KeyState, RegRead};
+use crate::model::RegKeyRef;
 use crate::msi::{self, MsiProductState};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,12 @@ pub enum UnknownReason {
     ProductStillInstalled,
     /// Exit code could not be obtained (e.g. process handle lost).
     ExitCodeUnavailable,
+    /// The Uninstall entry could not be read (e.g. access denied), so its
+    /// removal cannot be confirmed.
+    EntryUnreadable,
+    /// Some uninstaller processes were not tracked to completion (could not
+    /// be opened, or the user stopped waiting), so work may still be running.
+    TrackingIncomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,16 +56,50 @@ impl Outcome {
     }
 }
 
+/// State of the program's Uninstall entry after the uninstaller ran.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryState {
+    #[default]
+    Absent,
+    Present,
+    Unreadable(String),
+}
+
+/// Combine the state of every registry location the program was listed in.
+/// Any present key means present; otherwise any unreadable key means
+/// unreadable; only all-absent counts as removed.
+pub fn entry_state(reg: &dyn RegRead, keys: &[RegKeyRef]) -> EntryState {
+    let mut unreadable = None;
+    for k in keys {
+        match reg.key_state(k.root, k.view, &k.path) {
+            KeyState::Present => return EntryState::Present,
+            KeyState::Unreadable(e) => unreadable = Some(format!("{k}: {e}")),
+            KeyState::Absent => {}
+        }
+    }
+    unreadable.map(EntryState::Unreadable).unwrap_or(EntryState::Absent)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Postconditions {
-    /// The program's Uninstall registry key still exists (in any recorded view).
-    pub entry_still_present: bool,
+    /// The program's Uninstall registry entry (all recorded views).
+    pub entry: EntryState,
     /// For MSI: product state after the run.
     pub msi_state: Option<MsiProductState>,
     /// New PendingFileRenameOperations entries pointing into the install dir.
     pub new_pending_renames: bool,
-    /// Some descendant processes could not be opened for tracking.
+    /// Some uninstaller processes were not tracked until they exited.
     pub tracking_incomplete: bool,
+}
+
+/// A success-looking result is only confirmed when every tracked process
+/// was seen to exit; otherwise the uninstaller may still be working.
+fn confirm(success: Outcome, post: &Postconditions) -> Outcome {
+    if post.tracking_incomplete {
+        Outcome::Unknown(UnknownReason::TrackingIncomplete)
+    } else {
+        success
+    }
 }
 
 pub fn classify_msi(exit: Option<u32>, post: &Postconditions) -> Outcome {
@@ -66,14 +108,14 @@ pub fn classify_msi(exit: Option<u32>, post: &Postconditions) -> Outcome {
     };
     match code {
         msi::ERROR_SUCCESS => match post.msi_state {
-            Some(MsiProductState::NotInstalled) => Outcome::Succeeded,
+            Some(MsiProductState::NotInstalled) => confirm(Outcome::Succeeded, post),
             _ => Outcome::Unknown(UnknownReason::ProductStillInstalled),
         },
         msi::ERROR_INSTALL_USEREXIT => Outcome::Cancelled,
         msi::ERROR_UNKNOWN_PRODUCT => Outcome::Unknown(UnknownReason::NotInstalled),
         msi::ERROR_INSTALL_ALREADY_RUNNING => Outcome::Failed { code, retryable: true },
         msi::ERROR_SUCCESS_REBOOT_INITIATED => Outcome::RebootInitiated,
-        msi::ERROR_SUCCESS_REBOOT_REQUIRED => Outcome::SucceededRebootRequired,
+        msi::ERROR_SUCCESS_REBOOT_REQUIRED => confirm(Outcome::SucceededRebootRequired, post),
         other => Outcome::Failed { code: other, retryable: false },
     }
 }
@@ -85,14 +127,13 @@ pub fn classify_exe(exit: Option<u32>, post: &Postconditions) -> Outcome {
     if code != 0 {
         return Outcome::Failed { code, retryable: false };
     }
-    if post.entry_still_present {
-        return Outcome::Unknown(UnknownReason::EntryStillPresent);
+    match &post.entry {
+        EntryState::Present => return Outcome::Unknown(UnknownReason::EntryStillPresent),
+        EntryState::Unreadable(_) => return Outcome::Unknown(UnknownReason::EntryUnreadable),
+        EntryState::Absent => {}
     }
-    if post.new_pending_renames {
-        Outcome::SucceededRebootRequired
-    } else {
-        Outcome::Succeeded
-    }
+    let success = if post.new_pending_renames { Outcome::SucceededRebootRequired } else { Outcome::Succeeded };
+    confirm(success, post)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,11 +234,52 @@ mod tests {
     #[test]
     fn exe_outcomes_use_postconditions() {
         assert_eq!(classify_exe(Some(0), &post()), Outcome::Succeeded);
-        let present = Postconditions { entry_still_present: true, ..post() };
+        let present = Postconditions { entry: EntryState::Present, ..post() };
         assert_eq!(classify_exe(Some(0), &present), Outcome::Unknown(UnknownReason::EntryStillPresent));
         let reboot = Postconditions { new_pending_renames: true, ..post() };
         assert_eq!(classify_exe(Some(0), &reboot), Outcome::SucceededRebootRequired);
         assert_eq!(classify_exe(Some(2), &post()), Outcome::Failed { code: 2, retryable: false });
+    }
+
+    #[test]
+    fn incomplete_tracking_never_confirms_success() {
+        // Parent exited 0, a child removed the entry but was still running when
+        // the user stopped waiting: not a confirmed success.
+        let inc = Postconditions { tracking_incomplete: true, ..post() };
+        assert_eq!(classify_exe(Some(0), &inc), Outcome::Unknown(UnknownReason::TrackingIncomplete));
+        let inc_reboot = Postconditions { new_pending_renames: true, ..inc.clone() };
+        assert_eq!(classify_exe(Some(0), &inc_reboot), Outcome::Unknown(UnknownReason::TrackingIncomplete));
+        let msi_gone = Postconditions { msi_state: Some(MsiProductState::NotInstalled), ..inc };
+        assert_eq!(classify_msi(Some(0), &msi_gone), Outcome::Unknown(UnknownReason::TrackingIncomplete));
+        assert_eq!(classify_msi(Some(3010), &msi_gone), Outcome::Unknown(UnknownReason::TrackingIncomplete));
+        assert!(!Outcome::Unknown(UnknownReason::TrackingIncomplete).auto_scan_allowed());
+        // Failures still report as failures.
+        assert_eq!(classify_exe(Some(5), &msi_gone), Outcome::Failed { code: 5, retryable: false });
+    }
+
+    #[test]
+    fn unreadable_uninstall_key_is_uncertain() {
+        use crate::fakes::FakeReg;
+        use crate::model::{RegRoot, RegView, UNINSTALL_PATH};
+        let path = format!("{UNINSTALL_PATH}\\App");
+        let k64 = RegKeyRef { root: RegRoot::Hklm, view: RegView::Reg64, path: path.clone() };
+        let k32 = RegKeyRef { root: RegRoot::Hklm, view: RegView::Reg32, path: path.clone() };
+
+        let mut reg = FakeReg::new();
+        reg.key(RegRoot::Hklm, RegView::Reg64, &path, &[]).deny(RegRoot::Hklm, RegView::Reg64, &path);
+        let st = entry_state(&reg, &[k64.clone()]);
+        assert!(matches!(st, EntryState::Unreadable(_)), "denied is not absent: {st:?}");
+        let post = Postconditions { entry: st, ..post() };
+        assert_eq!(classify_exe(Some(0), &post), Outcome::Unknown(UnknownReason::EntryUnreadable));
+
+        // One view absent, the other unreadable: still unreadable, not removed.
+        let st = entry_state(&reg, &[k32.clone(), k64.clone()]);
+        assert!(matches!(st, EntryState::Unreadable(_)));
+        // One view present wins over unreadable.
+        reg.key(RegRoot::Hklm, RegView::Reg32, &path, &[]);
+        assert_eq!(entry_state(&reg, &[k64.clone(), k32.clone()]), EntryState::Present);
+        // Truly absent everywhere.
+        assert_eq!(entry_state(&FakeReg::new(), &[k64, k32]), EntryState::Absent);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // These verify UI behaviour only; they say nothing about Windows behaviour.
 import { expect, test, type Page } from '@playwright/test';
 
-type Scenario = 'success' | 'cancelled';
+type Scenario = 'success' | 'cancelled' | 'manual';
 
 async function mockBackend(page: Page, scenario: Scenario) {
   await page.addInitScript((scenario: Scenario) => {
@@ -13,6 +13,10 @@ async function mockBackend(page: Page, scenario: Scenario) {
     (window as any).__calls = calls;
     const emit = (event: string, payload: unknown) =>
       (listeners[event] ?? []).forEach((id) => callbacks.get(id)?.({ event, id, payload }));
+    (window as any).__emit = emit;
+    // Operations persist across reloads like backend state does.
+    const ops: any[] = JSON.parse(sessionStorage.getItem('mockOps') ?? '[]');
+    const saveOps = () => sessionStorage.setItem('mockOps', JSON.stringify(ops));
 
     const program = (id: string, name: string) => ({
       id, name, publisher: 'Acme Corporation', version: '2.3', scope: 'All users', views: ['64-bit'],
@@ -36,7 +40,7 @@ async function mockBackend(page: Page, scenario: Scenario) {
       ],
     };
     const opFinished = {
-      opId: 'op-1', programName: 'Acme Notes', state: 'finished', pids: [], trackingIncomplete: false,
+      opId: 'op-1', programId: 'm64:AcmeNotes', programName: 'Acme Notes', state: 'finished', pids: [], trackingIncomplete: false,
       outcome: scenario === 'success'
         ? { kind: 'succeeded', label: 'Uninstaller finished', detail: '', autoScanAllowed: true }
         : { kind: 'cancelled', label: 'Uninstall was cancelled', detail: '', autoScanAllowed: false },
@@ -54,12 +58,16 @@ async function mockBackend(page: Page, scenario: Scenario) {
         refusal: null, restorePoint: 'unavailable', restorePointNote: 'Unavailable in this build.', canLaunch: true,
       }),
       start_uninstall: () => {
-        setTimeout(() => emit('uninstall-update', opFinished), 50);
+        if (ops.some((o) => o.state !== 'finished')) throw 'Another uninstaller is still running.';
+        ops.push({ ...opFinished, state: 'running', pids: [1234], outcome: null });
+        saveOps();
+        if (scenario !== 'manual') setTimeout(() => emit('uninstall-update', opFinished), 50);
         return 'op-1';
       },
       get_operation: () => ({ ...opFinished, state: 'running', pids: [1234], outcome: null }),
+      list_operations: () => ops,
       start_scan: (a) => {
-        if (scenario !== 'success' && !a.acknowledgeUncertain) throw 'confirm required';
+        if (scenario === 'cancelled' && !a.acknowledgeUncertain) throw 'confirm required';
         setTimeout(() => emit('scan-done', { scanId: 'scan-1', phase: 'Done', itemsVisited: 42, candidateCount: 3, done: true, report }), 50);
         return 'scan-1';
       },
@@ -139,4 +147,54 @@ test('cancelled uninstall: no automatic scan; explicit acknowledgement required'
   await page.getByLabel(/Scan anyway; I understand/).check();
   await scanAnyway.click();
   await expect(page.getByText('The uninstall outcome was not a confirmed success')).toBeVisible();
+});
+
+test('navigating away during an uninstall keeps the operation reachable', async ({ page }) => {
+  await mockBackend(page, 'manual');
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Acme Notes' }).click();
+  await page.getByLabel(/vendor's uninstaller will run/).check();
+  await page.getByRole('button', { name: 'Run vendor uninstaller' }).click();
+  await expect(page.getByTestId('operation')).toContainText('Uninstaller running');
+
+  // Leave while the backend is still uninstalling.
+  await page.getByRole('button', { name: '← Programs' }).click();
+  await expect(page.getByTestId('running-op')).toContainText('Acme Notes');
+
+  // Progress that arrives while away is not lost.
+  await page.evaluate(() =>
+    (window as any).__emit('uninstall-update', {
+      opId: 'op-1', programId: 'm64:AcmeNotes', programName: 'Acme Notes', state: 'running', pids: [1234, 5678],
+      trackingIncomplete: false, outcome: null,
+    }),
+  );
+  await page.getByTestId('running-op').getByRole('button', { name: 'Open' }).click();
+  await expect(page.getByTestId('operation')).toContainText('Tracking 2 process(es)');
+  await expect(page.getByTestId('before-uninstall')).toHaveCount(0);
+
+  // The outcome is delivered to the reopened panel; it auto-scans because the
+  // operation finished while the panel was open.
+  await page.evaluate(() =>
+    (window as any).__emit('uninstall-update', {
+      opId: 'op-1', programId: 'm64:AcmeNotes', programName: 'Acme Notes', state: 'finished', pids: [],
+      trackingIncomplete: false, outcome: { kind: 'succeeded', label: 'Uninstaller finished', detail: '', autoScanAllowed: true },
+    }),
+  );
+  await expect(page.getByTestId('cleanup-disabled')).toBeVisible();
+});
+
+test('reload re-attaches to a running operation', async ({ page }) => {
+  await mockBackend(page, 'manual');
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Acme Notes' }).click();
+  await page.getByLabel(/vendor's uninstaller will run/).check();
+  await page.getByRole('button', { name: 'Run vendor uninstaller' }).click();
+  await expect(page.getByTestId('operation')).toBeVisible();
+  await page.reload();
+  // Component state is gone; the banner must come from list_operations.
+  await expect(page.getByTestId('running-op')).toContainText('Acme Notes');
+  await page.getByTestId('running-op').getByRole('button', { name: 'Open' }).click();
+  await expect(page.getByTestId('operation')).toContainText('Uninstaller running');
+  // Starting a second uninstall is not offered while one runs.
+  await expect(page.getByRole('button', { name: 'Run vendor uninstaller' })).toHaveCount(0);
 });

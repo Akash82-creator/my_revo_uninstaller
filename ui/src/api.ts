@@ -54,6 +54,7 @@ export interface OutcomeView {
 
 export interface OpView {
   opId: string;
+  programId: string;
   programName: string;
   state: 'ready' | 'launching' | 'running' | 'verifying' | 'finished';
   pids: number[];
@@ -108,6 +109,7 @@ export const api = {
   startUninstall: (programId: string) => invoke<string>('start_uninstall', { programId }),
   stopWaiting: (opId: string) => invoke<void>('stop_waiting', { opId }),
   getOperation: (opId: string) => invoke<OpView>('get_operation', { opId }),
+  listOperations: () => invoke<OpView[]>('list_operations'),
   startScan: (src: { opId?: string; programId?: string }, acknowledgeUncertain: boolean) =>
     invoke<string>('start_scan', { opId: src.opId ?? null, programId: src.programId ?? null, acknowledgeUncertain }),
   cancelScan: (scanId: string) => invoke<void>('cancel_scan', { scanId }),

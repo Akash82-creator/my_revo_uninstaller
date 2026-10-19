@@ -2,3 +2,4 @@
 node_modules
 /ui/dist
 /src-tauri/gen
+ui/test-results

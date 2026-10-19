@@ -32,7 +32,11 @@ jobs:
         run: |
           $env:SWEEP_FIXTURE = "$PWD\target\debug\sweep-fixture.exe"
           cargo test -p sweep-win --test stage_a_windows -- --ignored --test-threads=1 2>&1 | Tee-Object -FilePath stage-a-windows.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $code = $LASTEXITCODE
+          # Surface results as annotations (readable via the checks API).
+          Select-String -Path stage-a-windows.log -Pattern '^test .* \.\.\. (ok|FAILED)|panicked at|^\s+(left|right):|test result:' |
+            ForEach-Object { $l = $_.Line -replace '%','%25' -replace "`r",'' ; if ($l -match 'FAILED|panicked|left|right') { "::error title=stage_a_windows::$l" } else { "::notice title=stage_a_windows::$l" } }
+          exit $code
       - name: UI build + smoke tests (mocked backend)
         working-directory: ui
         run: |
