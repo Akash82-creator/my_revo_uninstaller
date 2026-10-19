@@ -1,5 +1,9 @@
 # Disposable-VM tests (Stage A)
 
+> The step-by-step manual procedure is in **`RUNBOOK.md`**, with the record
+> template in `docs/evidence/TEMPLATE.md`. Automated real-installer runs:
+> `.github/workflows/real-apps.yml`.
+
 **Status: PLANNED. Nothing in this folder has been executed.** Supplying
 these scripts does not count as passing them. Record real runs in
 `docs/evidence/` (date, Windows build, VM snapshot, log).

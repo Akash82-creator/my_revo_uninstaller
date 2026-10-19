@@ -36,3 +36,12 @@ pub fn execution_level(exe: &WinPath) -> Option<ExecutionLevel> {
         level
     }
 }
+
+/// Manifest level of the executable an uninstall command would launch.
+/// MSI uninstalls run msiexec, whose elevation Windows Installer manages.
+pub fn execution_level_for(cmd: &sweep_core::cmdline::UninstallCommand) -> Option<ExecutionLevel> {
+    match cmd {
+        sweep_core::cmdline::UninstallCommand::Exe { exe, .. } => execution_level(exe),
+        sweep_core::cmdline::UninstallCommand::Msi { .. } => None,
+    }
+}
