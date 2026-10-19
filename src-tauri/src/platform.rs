@@ -36,10 +36,7 @@ impl Platform {
     }
 
     pub fn manifest_level(&self, cmd: &UninstallCommand) -> Option<ExecutionLevel> {
-        match cmd {
-            UninstallCommand::Exe { exe, .. } => sweep_win::manifest::execution_level(exe),
-            UninstallCommand::Msi { .. } => None,
-        }
+        sweep_win::manifest::execution_level_for(cmd)
     }
 
     pub fn run_vendor_uninstall(

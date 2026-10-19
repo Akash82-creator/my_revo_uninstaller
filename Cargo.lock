@@ -3102,6 +3102,7 @@ name = "sweep-win"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "sweep-core",
  "windows 0.58.0",
  "winreg 0.52.0",

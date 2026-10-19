@@ -1,0 +1,72 @@
+# Stage A validation with REAL third-party installers in a disposable
+# GitHub-hosted Windows VM. Each run starts from a fresh image.
+#
+# What this covers: real MSI / NSIS / Inno uninstall registrations, command
+# parsing, launch planning, descendant tracking of real uninstallers,
+# outcome verification and read-only leftover scans.
+# What it does NOT cover: interactive dialogs and UAC prompts (the runner is
+# an admin account with UAC disabled, and silent switches are appended so the
+# run is unattended). Those are in tests/vm/RUNBOOK.md.
+name: real-apps
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/**"
+      - ".github/workflows/real-apps.yml"
+
+jobs:
+  real-apps:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build tests
+        run: cargo test -p sweep-win --test real_apps --no-run
+      - name: Download pinned installers (SHA-256 verified)
+        shell: pwsh
+        run: |
+          $apps = @(
+            @{ url = 'https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.msi'; sha = '98330e7e6db3507b444d576dc437a9ac4d82333a88a6bb6ef36a91fe3d85fa92' },
+            @{ url = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.7.1/npp.8.7.1.Installer.x64.exe'; sha = 'aa130d151859eccc8b4cc535ae756682069d626087e8c56a35b630df4b5f0024' },
+            @{ url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_3_3/innosetup-6.3.3.exe'; sha = '0bcb2a409dea17e305a27a6b09555cabe600e984f88570ab72575cd7e93c95e6' }
+          )
+          New-Item -ItemType Directory -Force installers | Out-Null
+          foreach ($a in $apps) {
+            $out = Join-Path installers (Split-Path $a.url -Leaf)
+            Invoke-WebRequest -Uri $a.url -OutFile $out
+            $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            if ($h -ne $a.sha) { throw "hash mismatch for $out : $h" }
+          }
+      - name: Install real apps silently
+        shell: pwsh
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "$PWD\installers\7z2408-x64.msi", '/qn', '/norestart' -Wait -PassThru
+          "7-Zip MSI install exit: $($p.ExitCode)"
+          $p = Start-Process "$PWD\installers\npp.8.7.1.Installer.x64.exe" -ArgumentList '/S' -Wait -PassThru
+          "Notepad++ install exit: $($p.ExitCode)"
+          $p = Start-Process "$PWD\installers\innosetup-6.3.3.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS' -Wait -PassThru
+          "Inno Setup install exit: $($p.ExitCode)"
+          Start-Sleep -Seconds 5
+      - name: Uninstall through Sweep and scan (read-only)
+        shell: pwsh
+        run: |
+          cargo test -p sweep-win --test real_apps -- --ignored --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath real-apps.log
+          $code = $LASTEXITCODE
+          foreach ($l in Select-String -Path real-apps.log -Pattern '^REAL_APP_RESULT ') {
+            $r = ($l.Line -replace '^REAL_APP_RESULT ', '') | ConvertFrom-Json
+            $msg = "outcome=$($r.outcome) tracked_max=$($r.max_tracked_processes) incomplete=$($r.tracking_incomplete) entry_after=$($r.entry_after) msi_after=$($r.msi_state_after) verb=$($r.planned_verb) elevated=$($r.sweep_elevated) secs=$([math]::Round($r.seconds,1)) | before: likely=$($r.scan_before.likely) review=$($r.scan_before.review) blocked=$($r.scan_before.blocked) | after: likely=$($r.scan_after.likely) review=$($r.scan_after.review) blocked=$($r.scan_after.blocked) complete=$($r.scan_after.complete) gaps=$($r.scan_after.gaps.Count) | after-candidates: " + (($r.scan_after.candidates | ForEach-Object { "$($_.verdict):$($_.target)" }) -join '; ')
+            "::notice title=$($r.app) ($($r.display_name))::$($msg -replace '%','%25')"
+          }
+          Select-String -Path real-apps.log -Pattern '^test .* \.\.\. FAILED|panicked at|^\s+(left|right):|test result:' |
+            ForEach-Object { $t = $_.Line -replace '%','%25'; if ($t -match 'FAILED|panicked|left|right') { "::error title=real_apps::$t" } else { "::notice title=real_apps::$t" } }
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-apps-results
+          path: |
+            real-apps.log
+            target/real-apps/*.json
