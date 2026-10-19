@@ -40,20 +40,35 @@ jobs:
             $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
             if ($h -ne $a.sha) { throw "hash mismatch for $out : $h" }
           }
-      - name: Install real apps silently
+      - name: Record registrations present before installing
+        run: cargo test -p sweep-win --test real_apps -- --ignored --exact record_preinstall_inventory --nocapture
+      - name: Install real apps silently (failed installs abort the run)
         shell: pwsh
         run: |
-          $p = Start-Process msiexec.exe -ArgumentList '/i', "$PWD\installers\7z2408-x64.msi", '/qn', '/norestart' -Wait -PassThru
-          "7-Zip MSI install exit: $($p.ExitCode)"
-          $p = Start-Process "$PWD\installers\npp.8.7.1.Installer.x64.exe" -ArgumentList '/S' -Wait -PassThru
-          "Notepad++ install exit: $($p.ExitCode)"
-          $p = Start-Process "$PWD\installers\innosetup-6.3.3.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS' -Wait -PassThru
-          "Inno Setup install exit: $($p.ExitCode)"
+          # Installer-specific success codes. Anything else (including MSI
+          # 3010/1641 reboot codes, unexpected on a fresh VM) fails the job, so a
+          # failed install can never be followed by uninstalling something else.
+          function Invoke-Installer([string]$name, [string]$file, [string[]]$installerArgs, [int[]]$ok) {
+            $p = Start-Process $file -ArgumentList $installerArgs -Wait -PassThru
+            "$name install exit code: $($p.ExitCode)"
+            Assert-InstallerExit $name $p.ExitCode $ok
+          }
+          function Assert-InstallerExit([string]$name, [int]$code, [int[]]$ok) {
+            if ($ok -notcontains $code) { throw "$name installer failed with exit code $code (accepted: $($ok -join ', '))" }
+          }
+          # Self-test of the check itself.
+          $threw = $false; try { Assert-InstallerExit 'selftest' 1603 @(0) } catch { $threw = $true }
+          if (-not $threw) { throw 'exit-code check self-test failed: 1603 was accepted' }
+          Assert-InstallerExit 'selftest' 0 @(0)
+
+          Invoke-Installer '7-Zip MSI' 'msiexec.exe' @('/i', "`"$PWD\installers\7z2408-x64.msi`"", '/qn', '/norestart') @(0)
+          Invoke-Installer 'Notepad++ (NSIS)' "$PWD\installers\npp.8.7.1.Installer.x64.exe" @('/S') @(0)
+          Invoke-Installer 'Inno Setup (Inno)' "$PWD\installers\innosetup-6.3.3.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS') @(0)
           Start-Sleep -Seconds 5
       - name: Uninstall through Sweep and scan (read-only)
         shell: pwsh
         run: |
-          cargo test -p sweep-win --test real_apps -- --ignored --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath real-apps.log
+          cargo test -p sweep-win --test real_apps -- --ignored --skip record_preinstall_inventory --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath real-apps.log
           $code = $LASTEXITCODE
           # With --nocapture the harness may prefix the line with "test x ... ".
           foreach ($l in Select-String -Path real-apps.log -Pattern 'REAL_APP_RESULT \{') {

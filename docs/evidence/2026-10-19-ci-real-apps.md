@@ -32,6 +32,20 @@ For each app, "passed" means all of the following held:
   - every path under `C:\Windows` is Blocked;
   - `CLEANUP_ENABLED == false`.
 
+**Weakness of run 1 (found in review):** run 1 did not reject failed
+installer exit codes. It selected registrations by name prefix and installer
+type only. If an install had failed on a runner that already had a matching
+product, the run could have uninstalled that product and still passed. Run 1
+therefore does not prove that each uninstalled registration was the one just
+installed. Since then:
+- the workflow fails on any non-success installer exit code (self-tested);
+- the inventory is recorded before installing;
+- the selected registration must match the pinned version, machine scope and
+  installer type (plus the ProductCode for the MSI), and must not have
+  existed before installation.
+
+These rules have regression tests in `crates/sweep-win/tests/expect_selection.rs`.
+
 **Limitation of this record:** the per-app detail (outcome, number of tracked
 processes, candidate lists) was not published as annotations because of a
 parsing bug in the workflow step. That step is fixed in the PR that adds this

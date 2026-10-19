@@ -15,6 +15,12 @@
 //! into annotations, and writes `target/real-apps/<app>.json`.
 #![cfg(windows)]
 
+#[path = "support/expect.rs"]
+mod expect;
+
+use expect::{reg_ids, select, Expect, RegId};
+use sweep_core::model::Scope;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -76,23 +82,29 @@ fn scan(snap: &sweep_core::evidence::EvidenceSnapshot, known: &sweep_core::api::
     s.run(&mut |_| {})
 }
 
-fn real_app_cycle(app: &str, name_prefix: &str, silent: &str, expect_msi: bool) {
+fn preinstall_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/real-apps/preinstall.json")
+}
+
+fn real_app_cycle(app: &str, expect: Expect, silent: &str) {
+    let expect_msi = expect.msi_product_code.is_some();
     let (entries, unreadable) = read_entries(&WinReg);
     let inv = build_inventory(entries, unreadable);
-    // The runner image may already carry another build of the same product
-    // (windows-latest ships an EXE-installed 7-Zip); pick by installer type.
-    let all: Vec<_> = inv.programs.iter().filter(|p| p.display_name.starts_with(name_prefix)).collect();
-    let others: Vec<String> =
-        all.iter().filter(|p| p.windows_installer != expect_msi).map(|p| p.display_name.clone()).collect();
-    let matches: Vec<_> = all.iter().filter(|p| p.windows_installer == expect_msi).collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "{app}: expected one {} entry starting with {name_prefix:?}, found {:?}",
-        if expect_msi { "MSI" } else { "non-MSI" },
-        all.iter().map(|p| (&p.display_name, p.windows_installer)).collect::<Vec<_>>()
-    );
-    let prog = *matches[0];
+    // The registrations present before the installers ran (recorded by the
+    // workflow). Required: without it a pre-existing product could be taken
+    // for the freshly installed one.
+    let preinstall: Vec<RegId> = serde_json::from_str(
+        &std::fs::read_to_string(preinstall_path())
+            .expect("preinstall.json missing: run record_preinstall_inventory first"),
+    )
+    .unwrap();
+    let prog = select(&inv, &expect, &preinstall).unwrap_or_else(|e| panic!("{app}: {e}"));
+    let others: Vec<String> = inv
+        .programs
+        .iter()
+        .filter(|p| p.display_name.starts_with(expect.name_prefix) && p.id != prog.id)
+        .map(|p| format!("{} v{:?}", p.display_name, p.version))
+        .collect();
 
     let known = known_folders();
     let env = |n: &str| std::env::var(n).ok();
@@ -194,10 +206,35 @@ fn real_app_cycle(app: &str, name_prefix: &str, silent: &str, expect_msi: bool) 
     }
 }
 
+/// Run by the workflow BEFORE the installers: records existing registrations.
+#[test]
+#[ignore = "real-apps workflow only: run before installing"]
+fn record_preinstall_inventory() {
+    let (entries, unreadable) = read_entries(&WinReg);
+    let inv = build_inventory(entries, unreadable);
+    let p = preinstall_path();
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, serde_json::to_string_pretty(&reg_ids(&inv)).unwrap()).unwrap();
+    for q in inv
+        .programs
+        .iter()
+        .filter(|q| ["7-Zip", "Notepad++", "Inno Setup"].iter().any(|n| q.display_name.starts_with(n)))
+    {
+        println!("PREINSTALL {} v{:?} {:?} msi={}", q.display_name, q.version, q.scope, q.windows_installer);
+    }
+}
+
 #[test]
 #[ignore = "real-apps workflow only: needs the pinned installers to be installed first"]
 fn msi_7zip() {
-    real_app_cycle("7zip-msi", "7-Zip", "/qn", true);
+    let e = Expect {
+        name_prefix: "7-Zip",
+        version: "24.08",
+        scope: Scope::Machine,
+        // Read from the pinned 7z2408-x64.msi Property table.
+        msi_product_code: Some("{23170F69-40C1-2702-2408-000001000000}"),
+    };
+    real_app_cycle("7zip-msi", e, "/qn");
 }
 
 #[test]
@@ -205,12 +242,14 @@ fn msi_7zip() {
 fn nsis_notepadplusplus() {
     // NSIS uninstallers copy themselves to %TEMP% and relaunch: exercises
     // descendant tracking against a real vendor uninstaller.
-    real_app_cycle("notepadpp-nsis", "Notepad++", "/S", false);
+    let e = Expect { name_prefix: "Notepad++", version: "8.7.1", scope: Scope::Machine, msi_product_code: None };
+    real_app_cycle("notepadpp-nsis", e, "/S");
 }
 
 #[test]
 #[ignore = "real-apps workflow only: needs the pinned installers to be installed first"]
 fn inno_innosetup() {
     // Inno Setup uninstallers also relaunch from a temp copy.
-    real_app_cycle("innosetup-inno", "Inno Setup", "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", false);
+    let e = Expect { name_prefix: "Inno Setup", version: "6.3.3", scope: Scope::Machine, msi_product_code: None };
+    real_app_cycle("innosetup-inno", e, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART");
 }
