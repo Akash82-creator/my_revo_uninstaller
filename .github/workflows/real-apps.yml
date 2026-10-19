@@ -41,7 +41,12 @@ jobs:
             if ($h -ne $a.sha) { throw "hash mismatch for $out : $h" }
           }
       - name: Record registrations present before installing
-        run: cargo test -p sweep-win --test real_apps -- --ignored --exact record_preinstall_inventory --nocapture
+        shell: pwsh
+        run: |
+          cargo test -p sweep-win --test real_apps -- --ignored --exact record_preinstall_inventory --nocapture 2>&1 | Tee-Object -FilePath preinstall.log
+          $code = $LASTEXITCODE
+          Select-String -Path preinstall.log -Pattern 'PREINSTALL ' | ForEach-Object { "::notice title=preinstall::$($_.Line -replace '%','%25')" }
+          exit $code
       - name: Install real apps silently (failed installs abort the run)
         shell: pwsh
         run: |
@@ -76,8 +81,14 @@ jobs:
             $msg = "outcome=$($r.outcome) tracked_max=$($r.max_tracked_processes) incomplete=$($r.tracking_incomplete) entry_after=$($r.entry_after) msi_after=$($r.msi_state_after) verb=$($r.planned_verb) elevated=$($r.sweep_elevated) secs=$([math]::Round($r.seconds,1)) | before: likely=$($r.scan_before.likely) review=$($r.scan_before.review) blocked=$($r.scan_before.blocked) | after: likely=$($r.scan_after.likely) review=$($r.scan_after.review) blocked=$($r.scan_after.blocked) complete=$($r.scan_after.complete) gaps=$($r.scan_after.gaps.Count) | after-candidates: " + (($r.scan_after.candidates | ForEach-Object { "$($_.verdict):$($_.target)" }) -join '; ')
             "::notice title=$($r.app) ($($r.display_name))::$($msg -replace '%','%25')"
           }
-          Select-String -Path real-apps.log -Pattern '\.\.\. (ok|FAILED)$|panicked at|^\s+(left|right):|test result:' |
-            ForEach-Object { $t = $_.Line -replace '%','%25'; if ($t -cmatch 'FAILED|panicked|^\s+(left|right):') { "::error title=real_apps::$t" } else { "::notice title=real_apps::$t" } }
+          # Panic messages follow the "panicked at" line, so include the next lines.
+          Select-String -Path real-apps.log -Pattern '\.\.\. (ok|FAILED)$|panicked at|^\s+(left|right):|test result:' -Context 0,2 |
+            ForEach-Object {
+              $t = $_.Line
+              if ($t -match 'panicked at') { $t = $t + ' :: ' + ($_.Context.PostContext -join ' | ') }
+              $t = $t -replace '%','%25'
+              if ($t -cmatch 'FAILED|panicked|^\s+(left|right):') { "::error title=real_apps::$t" } else { "::notice title=real_apps::$t" }
+            }
           exit $code
       - uses: actions/upload-artifact@v4
         if: always()
