@@ -63,5 +63,35 @@ processes, candidate lists) was not published as annotations because of a
 parsing bug in the workflow step. That step is fixed in the PR that adds this
 file. The next run's detail is recorded below.
 
-## Run 2: detail run
-_Pending; filled in from the run's annotations._
+## Run 2: hardened selection (PR #5 head `e3f58e9`)
+- **Run:** https://github.com/Akash82-creator/my_revo_uninstaller/actions/runs/39325138448 (merged as `4477ec2`)
+- **Installers:**
+  - 7-Zip 24.08 MSI
+  - Notepad++ 8.7.1 (NSIS)
+  - WinMerge 2.16.44 (Inno)
+  - All SHA-256 verified, all exited with code 0 (non-zero codes now fail the run).
+- **Already on the runner before installing:**
+  - Inno Setup 6.7.1 (EXE, machine)
+  - 7-Zip 26.04 (EXE, machine)
+- **Selection rules:** each test selected a registration that matched the pinned version, machine scope and installer type (plus the ProductCode for the MSI), and that did **not** exist before installation.
+
+`test result: ok. 3 passed; 0 failed` (8.8 s).
+
+| App | Outcome | Max processes tracked | After uninstall | Scan before (Likely / Review / Blocked) | Scan after (Likely / Review / Blocked) | Coverage after | Remaining candidates after |
+|---|---|---|---|---|---|---|---|
+| 7-Zip 24.08 (x64 edition), MSI | Succeeded | 1 | entry absent; MSI product not installed | 1 / 3 / 1 | 0 / 1 / 1 | 1 gap | Review: `ProgramData\...\Start Menu\Programs\7-Zip`; Blocked: `C:\Program Files\7-Zip` |
+| Notepad++ (64-bit x64), NSIS | SucceededRebootRequired | 3 | entry absent | 1 / 6 / 0 | 0 / 2 / 0 | 1 gap | Review: `...\Start Menu\Programs\Notepad.lnk`; Review: `HKLM\Software\Notepad++ (32-bit)` |
+| WinMerge 2.16.44.0 x64, Inno | Succeeded | 2 | entry absent | 5 / 5 / 0 | 0 / 0 / 0 | complete | none |
+
+**Observations**
+- **Descendant tracking:** this worked on real uninstallers that relaunch themselves. Sweep followed up to 3 processes for NSIS and 2 for Inno, and none of the runs had incomplete tracking.
+- **Notepad++ outcome:** reported as "restart required" because the uninstaller added `PendingFileRenameOperations` entries under its install folder.
+- **`C:\Program Files\7-Zip`:** it was **Blocked** both before and after the MSI uninstall. The runner's pre-existing EXE 7-Zip 26.04 registers the same folder, so Sweep protects it as another program's install location. This is the shared-folder protection working on a real system.
+- **Likely leftovers after uninstall:** none in any run. Everything left after an uninstall was found by name only and stayed in Review.
+- **Coverage gaps:** the 7-Zip and Notepad++ scans each recorded one gap. Which location it was is not published as an annotation; it is in the run's `real-apps-results` artifact.
+- **Invariants:** they held in all six scans. Every Likely candidate had ownership evidence and no concerns, `C:\Windows` paths were Blocked, and cleanup was disabled.
+
+## Not covered by these runs
+- Interactive uninstaller dialogs and **UAC** (standard user, other admin, consent): `tests/vm/RUNBOOK.md`, **not run yet**.
+- Reboot exit codes 3010/1641 from Windows Installer.
+- Sweep's UI. These runs drive the same backend code the app uses, but not the Tauri front end.
