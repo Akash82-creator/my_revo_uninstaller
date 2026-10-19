@@ -31,7 +31,10 @@ jobs:
           $apps = @(
             @{ url = 'https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.msi'; sha = '98330e7e6db3507b444d576dc437a9ac4d82333a88a6bb6ef36a91fe3d85fa92' },
             @{ url = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.7.1/npp.8.7.1.Installer.x64.exe'; sha = 'aa130d151859eccc8b4cc535ae756682069d626087e8c56a35b630df4b5f0024' },
-            @{ url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_3_3/innosetup-6.3.3.exe'; sha = '0bcb2a409dea17e305a27a6b09555cabe600e984f88570ab72575cd7e93c95e6' }
+            # Inno-based app NOT on the windows-latest image (the image ships Inno
+            # Setup itself, so installing Inno Setup would overwrite an existing
+            # registration).
+            @{ url = 'https://github.com/WinMerge/winmerge/releases/download/v2.16.44/WinMerge-2.16.44-x64-Setup.exe'; sha = '055e960261fc31723856082d2bf1aec2bcc2c71f1ae2d759efec3d766affeaec' }
           )
           New-Item -ItemType Directory -Force installers | Out-Null
           foreach ($a in $apps) {
@@ -68,7 +71,7 @@ jobs:
 
           Invoke-Installer '7-Zip MSI' 'msiexec.exe' @('/i', "`"$PWD\installers\7z2408-x64.msi`"", '/qn', '/norestart') @(0)
           Invoke-Installer 'Notepad++ (NSIS)' "$PWD\installers\npp.8.7.1.Installer.x64.exe" @('/S') @(0)
-          Invoke-Installer 'Inno Setup (Inno)' "$PWD\installers\innosetup-6.3.3.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS') @(0)
+          Invoke-Installer 'WinMerge (Inno)' "$PWD\installers\WinMerge-2.16.44-x64-Setup.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS') @(0)
           Start-Sleep -Seconds 5
       - name: Uninstall through Sweep and scan (read-only)
         shell: pwsh

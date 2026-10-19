@@ -17,7 +17,7 @@ It is **not** a substitute for the manual UAC runbook (`tests/vm/RUNBOOK.md`):
 |---|---|---|
 | 7-Zip 24.08 | MSI | **passed** |
 | Notepad++ 8.7.1 | NSIS (uninstaller relaunches from `%TEMP%`) | **passed** |
-| Inno Setup 6.3.3 | Inno (uninstaller relaunches from a temp copy) | **passed** |
+| Inno Setup 6.3.3 | Inno (uninstaller relaunches from a temp copy) | ~~passed~~ **invalid** (see below) |
 
 `test result: ok. 3 passed; 0 failed` (8.4 s for all three uninstalls).
 
@@ -45,6 +45,18 @@ installed. Since then:
   existed before installation.
 
 These rules have regression tests in `crates/sweep-win/tests/expect_selection.rs`.
+
+**Confirmed on the runner (run on `dbfda81`):** the `windows-latest` image
+already contains **Inno Setup 6.7.1**, registered as
+`HKLM\...\Uninstall\Inno Setup 6_is1` (32-bit view). Installing the pinned
+6.3.3 overwrote that registration in place. The hardened selection refused it
+("already existed before installation"). Run 1's Inno Setup result therefore
+**uninstalled the runner's pre-existing registration**, which is exactly the
+problem the review described, and it is marked invalid above. The Inno test
+now uses **WinMerge 2.16.44** (Inno-based, SHA-256 `055e9602…affeaec`), which
+the image does not ship. The pre-install inventory also showed an
+EXE-installed **7-Zip 26.04**. The 7-Zip MSI test is unaffected: it requires
+the 24.08 ProductCode, and that registration did not exist before.
 
 **Limitation of this record:** the per-app detail (outcome, number of tracked
 processes, candidate lists) was not published as annotations because of a

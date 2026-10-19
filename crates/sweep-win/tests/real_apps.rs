@@ -218,7 +218,7 @@ fn record_preinstall_inventory() {
     for q in inv
         .programs
         .iter()
-        .filter(|q| ["7-Zip", "Notepad++", "Inno Setup"].iter().any(|n| q.display_name.starts_with(n)))
+        .filter(|q| ["7-Zip", "Notepad++", "Inno Setup", "WinMerge"].iter().any(|n| q.display_name.starts_with(n)))
     {
         println!("PREINSTALL {} v{:?} {:?} msi={}", q.display_name, q.version, q.scope, q.windows_installer);
     }
@@ -248,8 +248,10 @@ fn nsis_notepadplusplus() {
 
 #[test]
 #[ignore = "real-apps workflow only: needs the pinned installers to be installed first"]
-fn inno_innosetup() {
-    // Inno Setup uninstallers also relaunch from a temp copy.
-    let e = Expect { name_prefix: "Inno Setup", version: "6.3.3", scope: Scope::Machine, msi_product_code: None };
-    real_app_cycle("innosetup-inno", e, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART");
+fn inno_winmerge() {
+    // Inno uninstallers also relaunch from a temp copy. WinMerge is used
+    // because the runner image already ships Inno Setup itself, whose
+    // registration an Inno Setup install would overwrite in place.
+    let e = Expect { name_prefix: "WinMerge", version: "2.16.44", scope: Scope::Machine, msi_product_code: None };
+    real_app_cycle("winmerge-inno", e, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART");
 }
