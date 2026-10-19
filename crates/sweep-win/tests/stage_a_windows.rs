@@ -25,6 +25,14 @@ use sweep_win::fs::WinFs;
 use sweep_win::known::known_folders;
 use sweep_win::registry::WinReg;
 
+/// %TEMP% resolved to its long path. CI runners use an 8.3 short TEMP
+/// (C:\Users\RUNNER~1\...), which Sweep reports as "resolves elsewhere".
+fn temp_dir() -> PathBuf {
+    let p = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let s = p.to_string_lossy();
+    PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
+}
+
 fn fixture() -> PathBuf {
     PathBuf::from(std::env::var("SWEEP_FIXTURE").expect("set SWEEP_FIXTURE to target\\debug\\sweep-fixture.exe"))
 }
@@ -192,7 +200,7 @@ fn shared_publisher_two_products() {
 #[test]
 #[ignore = "Windows CI: requires SWEEP_FIXTURE"]
 fn junction_in_installdir_not_followed() {
-    let sentinel = std::env::temp_dir().join(unique("Sentinel"));
+    let sentinel = temp_dir().join(unique("Sentinel"));
     std::fs::create_dir_all(&sentinel).unwrap();
     std::fs::write(sentinel.join("precious.docx"), b"keep").unwrap();
     let name = unique("Junction");
@@ -234,7 +242,7 @@ fn mklink_junction(link: &std::path::Path, target: &std::path::Path) {
 fn ancestor_junction_is_not_followed() {
     // Install through an alias: <temp>\Alias -> <temp>\Real. The install
     // folder itself is a normal directory, but its ancestor is a junction.
-    let base = std::env::temp_dir().join(unique("Anc"));
+    let base = temp_dir().join(unique("Anc"));
     let real = base.join("Real");
     let alias = base.join("Alias");
     std::fs::create_dir_all(&real).unwrap();
@@ -259,7 +267,7 @@ fn ancestor_junction_is_not_followed() {
 #[test]
 #[ignore = "Windows CI: requires SWEEP_FIXTURE"]
 fn directory_replaced_by_junction_is_not_listed_through() {
-    let base = std::env::temp_dir().join(unique("Swap"));
+    let base = temp_dir().join(unique("Swap"));
     let dir = base.join("dir");
     let elsewhere = base.join("elsewhere");
     std::fs::create_dir_all(&dir).unwrap();

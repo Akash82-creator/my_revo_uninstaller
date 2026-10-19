@@ -65,7 +65,11 @@ pub fn known_folders() -> KnownFolders {
         videos: get("Videos", &FOLDERID_Videos),
         downloads: get("Downloads", &FOLDERID_Downloads),
         one_drive: get("SkyDrive", &FOLDERID_SkyDrive),
-        temp: WinPath::from_api(&std::env::temp_dir().to_string_lossy()).ok(),
+        // %TEMP% is often an 8.3 short path (e.g. C:\Users\RUNNER~1\...);
+        // resolve it to the long final path so comparisons work.
+        temp: std::fs::canonicalize(std::env::temp_dir())
+            .ok()
+            .and_then(|p| WinPath::from_api(&p.to_string_lossy()).ok()),
         sweep_dirs: exe_dir.into_iter().collect(),
         unresolved: Vec::new(),
     };
