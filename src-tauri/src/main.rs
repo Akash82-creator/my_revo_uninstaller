@@ -15,8 +15,9 @@ use sweep_core::scan::{CancelToken, Progress, ScanOptions, ScanReport, Scanner};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct Op {
-    program_id: String,
-    program_name: String,
+    /// What was launched, captured at start. Operations are rendered from
+    /// this, never from the live inventory, which the uninstaller may change.
+    info: Arc<views::OpInfo>,
     snapshot: Arc<EvidenceSnapshot>,
     state: UninstallState,
     stop: Arc<AtomicBool>,
@@ -111,30 +112,24 @@ fn start_uninstall(app: AppHandle, state: State<AppState>, program_id: String) -
     let (snap, p) = snapshot_for(&state.platform, &inner.inventory, &program_id)?;
     let plan = plan_for(&state.platform, &snap, p.scope)?;
     let op_id = state.id("op");
+    let info =
+        Arc::new(views::OpInfo { program: views::program(&p), launch: views::preview(&p, &snap, Ok(plan.clone())) });
     let snap = Arc::new(snap);
     let stop = Arc::new(AtomicBool::new(false));
     inner.ops.insert(
         op_id.clone(),
-        Op {
-            program_id: p.id.clone(),
-            program_name: p.display_name.clone(),
-            snapshot: snap.clone(),
-            state: UninstallState::Ready,
-            stop: stop.clone(),
-        },
+        Op { info: info.clone(), snapshot: snap.clone(), state: UninstallState::Ready, stop: stop.clone() },
     );
     drop(inner);
     let platform = state.platform.clone();
     let id = op_id.clone();
-    let name = p.display_name.clone();
-    let pid = p.id.clone();
     std::thread::spawn(move || {
         let st = app.state::<AppState>();
         let update = |s: &UninstallState| {
             if let Some(op) = st.inner.lock().unwrap().ops.get_mut(&id) {
                 op.state = s.clone();
             }
-            let _ = app.emit("uninstall-update", views::op(&id, &pid, &name, s));
+            let _ = app.emit("uninstall-update", views::op(&id, &info, s));
         };
         platform.run_vendor_uninstall(&snap, &plan, &stop, update);
     });
@@ -153,7 +148,7 @@ fn stop_waiting(state: State<AppState>, op_id: String) -> Res<()> {
 fn get_operation(state: State<AppState>, op_id: String) -> Res<views::OpView> {
     let inner = state.inner.lock().unwrap();
     let op = inner.ops.get(&op_id).ok_or("unknown operation")?;
-    Ok(views::op(&op_id, &op.program_id, &op.program_name, &op.state))
+    Ok(views::op(&op_id, &op.info, &op.state))
 }
 
 /// All operations of this session, newest first, so the UI can re-attach to
@@ -163,7 +158,7 @@ fn list_operations(state: State<AppState>) -> Vec<views::OpView> {
     let inner = state.inner.lock().unwrap();
     let mut ops: Vec<_> = inner.ops.iter().collect();
     ops.sort_by_key(|(id, _)| std::cmp::Reverse(id.trim_start_matches("op-").parse::<u64>().unwrap_or(0)));
-    ops.into_iter().map(|(id, op)| views::op(id, &op.program_id, &op.program_name, &op.state)).collect()
+    ops.into_iter().map(|(id, op)| views::op(id, &op.info, &op.state)).collect()
 }
 
 /// Start a read-only leftover scan, either for a finished uninstall

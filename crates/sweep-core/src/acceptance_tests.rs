@@ -493,3 +493,48 @@ fn other_build_in_other_view_is_protected() {
     assert_eq!(find(&r, "C:\\Program Files\\Acme Tool").unwrap().verdict, Verdict::Likely);
     assert_eq!(find(&r, "C:\\Program Files (x86)\\Acme Tool").unwrap().verdict, Verdict::Blocked);
 }
+
+#[test]
+fn trailing_dot_name_is_a_coverage_gap() {
+    // `data` and `data.` are different directories on disk. Win32 path
+    // normalization would turn `data.` into `data`; Sweep must not.
+    let mut w = world();
+    w.fs.file("C:\\Program Files\\Acme\\Notes\\data\\a.bin", 10, BEFORE_INSTALL);
+    w.fs.raw_entry(
+        "C:\\Program Files\\Acme\\Notes",
+        "data.",
+        crate::api::EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: Some(0) },
+    );
+    w.fs.raw_entry(
+        "C:\\Program Files\\Acme\\Notes",
+        "notes.ini ",
+        crate::api::EntryMeta { is_dir: false, is_reparse: false, size: 5, modified: Some(0) },
+    );
+    let r = scan(&w, "Acme Notes");
+    let c = find(&r, "C:\\Program Files\\Acme\\Notes").unwrap();
+    let st = c.stats.as_ref().unwrap();
+    // unins000.exe, notes.dll, data\a.bin: `data` counted once, `data.` not merged into it.
+    assert_eq!(st.files, 3, "{st:?}");
+    assert_eq!(st.dirs, 2, "Notes and data only: {st:?}");
+    assert_eq!(st.unreadable.len(), 2, "{st:?}");
+    assert_eq!(c.verdict, Verdict::Review);
+    assert!(c.concerns.iter().any(|k| k.contains("unreadable")), "{:?}", c.concerns);
+    let gaps: Vec<_> = r.gaps().map(|g| g.location.clone()).collect();
+    assert!(gaps.iter().any(|g| g.ends_with("Notes\\data.")), "{gaps:?}");
+    assert!(gaps.iter().any(|g| g.ends_with("Notes\\notes.ini ")), "{gaps:?}");
+    assert!(!r.complete);
+}
+
+#[test]
+fn trailing_dot_name_at_scan_root_is_a_gap_not_a_candidate() {
+    let mut w = world();
+    w.fs.raw_entry(
+        "C:\\ProgramData",
+        "Acme Notes.",
+        crate::api::EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: Some(0) },
+    );
+    let r = scan(&w, "Acme Notes");
+    assert!(r.gaps().any(|g| g.location.ends_with("ProgramData\\Acme Notes.")));
+    assert!(find(&r, "C:\\ProgramData\\Acme Notes").is_none(), "must not inspect the normalized sibling");
+    assert!(!r.complete);
+}

@@ -198,13 +198,22 @@ pub struct OpView {
     pub op_id: String,
     pub program_id: String,
     pub program_name: String,
+    /// Program and launch details as they were when the uninstaller started.
+    pub program: ProgramView,
+    pub launch: PreviewView,
     pub state: &'static str,
     pub pids: Vec<u32>,
     pub tracking_incomplete: bool,
     pub outcome: Option<OutcomeView>,
 }
 
-pub fn op(op_id: &str, program_id: &str, program_name: &str, st: &UninstallState) -> OpView {
+/// Snapshot of what an operation launched, independent of live inventory.
+pub struct OpInfo {
+    pub program: ProgramView,
+    pub launch: PreviewView,
+}
+
+pub fn op(op_id: &str, info: &OpInfo, st: &UninstallState) -> OpView {
     let (state, pids, inc, out) = match st {
         UninstallState::Ready => ("ready", vec![], false, None),
         UninstallState::Launching => ("launching", vec![], false, None),
@@ -216,8 +225,10 @@ pub fn op(op_id: &str, program_id: &str, program_name: &str, st: &UninstallState
     };
     OpView {
         op_id: op_id.into(),
-        program_id: program_id.into(),
-        program_name: program_name.into(),
+        program_id: info.program.id.clone(),
+        program_name: info.program.name.clone(),
+        program: info.program.clone(),
+        launch: info.launch.clone(),
         state,
         pids,
         tracking_incomplete: inc,
