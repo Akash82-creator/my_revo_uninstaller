@@ -141,6 +141,11 @@ fn read_i64(b: &[u8], at: usize) -> i64 {
 }
 
 impl FsRead for WinFs {
+    fn launch_target_exists(&self, path: &WinPath) -> bool {
+        // Follows links, like ShellExecuteEx will.
+        std::fs::metadata(crate::wide::extended(path)).map(|m| m.is_file()).unwrap_or(false)
+    }
+
     fn metadata(&self, path: &WinPath) -> Result<EntryMeta, FsError> {
         let h = open_verified(path, false)?;
         info(&h)

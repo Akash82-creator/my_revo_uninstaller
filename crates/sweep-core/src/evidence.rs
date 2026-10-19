@@ -270,7 +270,7 @@ pub fn take_snapshot(program: &InstalledProgram, inventory: &Inventory, senv: &S
     if let Some(d) = &icon_dir {
         anchors.push(d.clone());
     }
-    let exists = |p: &WinPath| senv.fs.is_file(p);
+    let exists = |p: &WinPath| senv.fs.launch_target_exists(p);
     let ctx = ParseContext {
         env: senv.env,
         file_exists: &exists,

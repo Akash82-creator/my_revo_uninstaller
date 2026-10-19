@@ -67,7 +67,7 @@ The GNU cross-build puts `WebView2Loader.dll` next to `sweep.exe`; ship both.
 
 | Suite | Environment | Status |
 |---|---|---|
-| `sweep-core` unit and acceptance tests (56) | Linux, fakes with Windows semantics | **Run: 56 passed** |
+| `sweep-core` unit and acceptance tests (57) | Linux, fakes with Windows semantics | **Run: 57 passed** |
 | Workspace type-check for `x86_64-pc-windows-gnu` | Linux + mingw | **Run: 0 warnings, 0 errors** |
 | UI type-check (`svelte-check`) and build | Linux | **Run: 0 errors, 0 warnings** |
 | UI smoke tests (4) | Linux headless Chromium, **mocked** backend | **Run: 4 passed** (the 2 navigation tests fail against the pre-fix UI) |

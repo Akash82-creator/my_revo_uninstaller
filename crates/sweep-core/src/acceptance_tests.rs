@@ -368,6 +368,19 @@ fn ancestor_junction_not_followed() {
 }
 
 #[test]
+fn uninstaller_behind_junction_can_launch_but_is_not_scanned() {
+    // Launching the vendor's registered uninstaller follows the junction (as
+    // Windows will); scanning and ownership never do.
+    let w = world();
+    w.fs.replace_with_junction("C:\\Program Files\\Acme", "E:\\Elsewhere\\Acme");
+    let snap = snapshot(&w, "Acme Notes");
+    assert!(snap.command.is_ok(), "{:?}", snap.command);
+    let r = scan_with(&w, &snap, CancelToken::default());
+    assert!(find(&r, "C:\\Program Files\\Acme\\Notes").is_none());
+    assert!(!r.complete);
+}
+
+#[test]
 fn ancestor_replaced_by_junction_during_scan() {
     // Race: after the publisher folder is listed, it is swapped for a junction
     // before its product subfolder is inspected.

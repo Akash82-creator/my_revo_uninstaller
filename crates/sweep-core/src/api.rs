@@ -39,6 +39,13 @@ pub trait FsRead: Sync {
     fn is_file(&self, path: &WinPath) -> bool {
         matches!(self.metadata(path), Ok(m) if !m.is_dir && !m.is_reparse)
     }
+    /// Whether a vendor uninstaller exists at `path`, following junctions and
+    /// symlinks the way launching it would. Only used to decide whether a
+    /// registered uninstall command can be run; scanning and ownership always
+    /// use the strict, non-following `metadata`/`read_dir`.
+    fn launch_target_exists(&self, path: &WinPath) -> bool {
+        self.is_file(path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

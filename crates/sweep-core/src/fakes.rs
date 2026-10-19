@@ -121,6 +121,11 @@ impl FsRead for FakeFs {
         self.nodes.lock().unwrap().get(&path.key()).map(|(_, m, _)| m.clone()).ok_or(FsError::NotFound)
     }
 
+    fn launch_target_exists(&self, path: &WinPath) -> bool {
+        // Follows junctions: the node exists, whatever its ancestors are.
+        matches!(self.nodes.lock().unwrap().get(&path.key()), Some((_, m, _)) if !m.is_dir)
+    }
+
     fn read_dir(&self, path: &WinPath) -> Result<Vec<DirEntry>, FsError> {
         self.run_hook(&self.on_read_dir, path);
         if self.denied.lock().unwrap().contains(&path.key()) {
