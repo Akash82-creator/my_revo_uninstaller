@@ -31,7 +31,10 @@ jobs:
           $apps = @(
             @{ url = 'https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.msi'; sha = '98330e7e6db3507b444d576dc437a9ac4d82333a88a6bb6ef36a91fe3d85fa92' },
             @{ url = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.7.1/npp.8.7.1.Installer.x64.exe'; sha = 'aa130d151859eccc8b4cc535ae756682069d626087e8c56a35b630df4b5f0024' },
-            @{ url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_3_3/innosetup-6.3.3.exe'; sha = '0bcb2a409dea17e305a27a6b09555cabe600e984f88570ab72575cd7e93c95e6' }
+            # Inno-based app NOT on the windows-latest image (the image ships Inno
+            # Setup itself, so installing Inno Setup would overwrite an existing
+            # registration).
+            @{ url = 'https://github.com/WinMerge/winmerge/releases/download/v2.16.44/WinMerge-2.16.44-x64-Setup.exe'; sha = '055e960261fc31723856082d2bf1aec2bcc2c71f1ae2d759efec3d766affeaec' }
           )
           New-Item -ItemType Directory -Force installers | Out-Null
           foreach ($a in $apps) {
@@ -40,28 +43,55 @@ jobs:
             $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
             if ($h -ne $a.sha) { throw "hash mismatch for $out : $h" }
           }
-      - name: Install real apps silently
+      - name: Record registrations present before installing
         shell: pwsh
         run: |
-          $p = Start-Process msiexec.exe -ArgumentList '/i', "$PWD\installers\7z2408-x64.msi", '/qn', '/norestart' -Wait -PassThru
-          "7-Zip MSI install exit: $($p.ExitCode)"
-          $p = Start-Process "$PWD\installers\npp.8.7.1.Installer.x64.exe" -ArgumentList '/S' -Wait -PassThru
-          "Notepad++ install exit: $($p.ExitCode)"
-          $p = Start-Process "$PWD\installers\innosetup-6.3.3.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS' -Wait -PassThru
-          "Inno Setup install exit: $($p.ExitCode)"
+          cargo test -p sweep-win --test real_apps -- --ignored --exact record_preinstall_inventory --nocapture 2>&1 | Tee-Object -FilePath preinstall.log
+          $code = $LASTEXITCODE
+          Select-String -Path preinstall.log -Pattern 'PREINSTALL ' | ForEach-Object { "::notice title=preinstall::$($_.Line -replace '%','%25')" }
+          exit $code
+      - name: Install real apps silently (failed installs abort the run)
+        shell: pwsh
+        run: |
+          # Installer-specific success codes. Anything else (including MSI
+          # 3010/1641 reboot codes, unexpected on a fresh VM) fails the job, so a
+          # failed install can never be followed by uninstalling something else.
+          function Invoke-Installer([string]$name, [string]$file, [string[]]$installerArgs, [int[]]$ok) {
+            $p = Start-Process $file -ArgumentList $installerArgs -Wait -PassThru
+            "$name install exit code: $($p.ExitCode)"
+            Assert-InstallerExit $name $p.ExitCode $ok
+          }
+          function Assert-InstallerExit([string]$name, [int]$code, [int[]]$ok) {
+            if ($ok -notcontains $code) { throw "$name installer failed with exit code $code (accepted: $($ok -join ', '))" }
+          }
+          # Self-test of the check itself.
+          $threw = $false; try { Assert-InstallerExit 'selftest' 1603 @(0) } catch { $threw = $true }
+          if (-not $threw) { throw 'exit-code check self-test failed: 1603 was accepted' }
+          Assert-InstallerExit 'selftest' 0 @(0)
+
+          Invoke-Installer '7-Zip MSI' 'msiexec.exe' @('/i', "`"$PWD\installers\7z2408-x64.msi`"", '/qn', '/norestart') @(0)
+          Invoke-Installer 'Notepad++ (NSIS)' "$PWD\installers\npp.8.7.1.Installer.x64.exe" @('/S') @(0)
+          Invoke-Installer 'WinMerge (Inno)' "$PWD\installers\WinMerge-2.16.44-x64-Setup.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS') @(0)
           Start-Sleep -Seconds 5
       - name: Uninstall through Sweep and scan (read-only)
         shell: pwsh
         run: |
-          cargo test -p sweep-win --test real_apps -- --ignored --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath real-apps.log
+          cargo test -p sweep-win --test real_apps -- --ignored --skip record_preinstall_inventory --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath real-apps.log
           $code = $LASTEXITCODE
-          foreach ($l in Select-String -Path real-apps.log -Pattern '^REAL_APP_RESULT ') {
-            $r = ($l.Line -replace '^REAL_APP_RESULT ', '') | ConvertFrom-Json
+          # With --nocapture the harness may prefix the line with "test x ... ".
+          foreach ($l in Select-String -Path real-apps.log -Pattern 'REAL_APP_RESULT \{') {
+            $r = ($l.Line -replace '^.*?REAL_APP_RESULT ', '') | ConvertFrom-Json
             $msg = "outcome=$($r.outcome) tracked_max=$($r.max_tracked_processes) incomplete=$($r.tracking_incomplete) entry_after=$($r.entry_after) msi_after=$($r.msi_state_after) verb=$($r.planned_verb) elevated=$($r.sweep_elevated) secs=$([math]::Round($r.seconds,1)) | before: likely=$($r.scan_before.likely) review=$($r.scan_before.review) blocked=$($r.scan_before.blocked) | after: likely=$($r.scan_after.likely) review=$($r.scan_after.review) blocked=$($r.scan_after.blocked) complete=$($r.scan_after.complete) gaps=$($r.scan_after.gaps.Count) | after-candidates: " + (($r.scan_after.candidates | ForEach-Object { "$($_.verdict):$($_.target)" }) -join '; ')
             "::notice title=$($r.app) ($($r.display_name))::$($msg -replace '%','%25')"
           }
-          Select-String -Path real-apps.log -Pattern '^test .* \.\.\. FAILED|panicked at|^\s+(left|right):|test result:' |
-            ForEach-Object { $t = $_.Line -replace '%','%25'; if ($t -match 'FAILED|panicked|left|right') { "::error title=real_apps::$t" } else { "::notice title=real_apps::$t" } }
+          # Panic messages follow the "panicked at" line, so include the next lines.
+          Select-String -Path real-apps.log -Pattern '\.\.\. (ok|FAILED)$|panicked at|^\s+(left|right):|test result:' -Context 0,2 |
+            ForEach-Object {
+              $t = $_.Line
+              if ($t -match 'panicked at') { $t = $t + ' :: ' + ($_.Context.PostContext -join ' | ') }
+              $t = $t -replace '%','%25'
+              if ($t -cmatch 'FAILED|panicked|^\s+(left|right):') { "::error title=real_apps::$t" } else { "::notice title=real_apps::$t" }
+            }
           exit $code
       - uses: actions/upload-artifact@v4
         if: always()

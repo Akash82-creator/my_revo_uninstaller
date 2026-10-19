@@ -1,0 +1,67 @@
+# Real-installer validation on a disposable GitHub Windows VM
+
+Automated part of the Stage A validation (`.github/workflows/real-apps.yml`).
+It is **not** a substitute for the manual UAC runbook (`tests/vm/RUNBOOK.md`):
+- the runner is an admin account with UAC disabled;
+- each vendor's silent switch is appended so the run is unattended.
+
+## Run 1: merge of PR #4
+- **Run:** https://github.com/Akash82-creator/my_revo_uninstaller/actions/runs/39322471188 (head `d918e40`)
+- **VM:** GitHub-hosted `windows-latest`, fresh image
+- **Installers:** pinned releases downloaded from GitHub and verified by SHA-256 before use (the hashes are in the workflow):
+  - 7-Zip 24.08 MSI
+  - Notepad++ 8.7.1 (NSIS)
+  - Inno Setup 6.3.3 (Inno)
+
+| App | Installer type | Result |
+|---|---|---|
+| 7-Zip 24.08 | MSI | **passed** |
+| Notepad++ 8.7.1 | NSIS (uninstaller relaunches from `%TEMP%`) | **passed** |
+| Inno Setup 6.3.3 | Inno (uninstaller relaunches from a temp copy) | ~~passed~~ **invalid** (see below) |
+
+`test result: ok. 3 passed; 0 failed` (8.4 s for all three uninstalls).
+
+For each app, "passed" means all of the following held:
+- The app was found in the inventory.
+- Its real `UninstallString` was parsed into a launchable command.
+- The read-only scan before uninstalling found the installed folder with ownership evidence.
+- The vendor uninstaller ran through Sweep's launch/track/verify flow, and the outcome was **Succeeded** (or SucceededRebootRequired).
+- Afterwards the Uninstall registry entry was **absent** and, for the MSI, `MsiQueryProductState` reported **not installed**.
+- Both scans held the safety invariants:
+  - every Likely candidate has ownership evidence and no shared/user-data/coverage concerns, and is not protected;
+  - every path under `C:\Windows` is Blocked;
+  - `CLEANUP_ENABLED == false`.
+
+**Weakness of run 1 (found in review):** run 1 did not reject failed
+installer exit codes. It selected registrations by name prefix and installer
+type only. If an install had failed on a runner that already had a matching
+product, the run could have uninstalled that product and still passed. Run 1
+therefore does not prove that each uninstalled registration was the one just
+installed. Since then:
+- the workflow fails on any non-success installer exit code (self-tested);
+- the inventory is recorded before installing;
+- the selected registration must match the pinned version, machine scope and
+  installer type (plus the ProductCode for the MSI), and must not have
+  existed before installation.
+
+These rules have regression tests in `crates/sweep-win/tests/expect_selection.rs`.
+
+**Confirmed on the runner (run on `dbfda81`):** the `windows-latest` image
+already contains **Inno Setup 6.7.1**, registered as
+`HKLM\...\Uninstall\Inno Setup 6_is1` (32-bit view). Installing the pinned
+6.3.3 overwrote that registration in place. The hardened selection refused it
+("already existed before installation"). Run 1's Inno Setup result therefore
+**uninstalled the runner's pre-existing registration**, which is exactly the
+problem the review described, and it is marked invalid above. The Inno test
+now uses **WinMerge 2.16.44** (Inno-based, SHA-256 `055e9602…affeaec`), which
+the image does not ship. The pre-install inventory also showed an
+EXE-installed **7-Zip 26.04**. The 7-Zip MSI test is unaffected: it requires
+the 24.08 ProductCode, and that registration did not exist before.
+
+**Limitation of this record:** the per-app detail (outcome, number of tracked
+processes, candidate lists) was not published as annotations because of a
+parsing bug in the workflow step. That step is fixed in the PR that adds this
+file. The next run's detail is recorded below.
+
+## Run 2: detail run
+_Pending; filled in from the run's annotations._
