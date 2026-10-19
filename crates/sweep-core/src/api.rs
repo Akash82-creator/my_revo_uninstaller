@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 pub enum FsError {
     NotFound,
     AccessDenied,
+    /// The path resolves somewhere else: an ancestor is a junction/symlink
+    /// or mount point (the resolved location is given). Never followed.
+    Redirected(String),
     Other(String),
 }
 
@@ -45,12 +48,26 @@ pub enum RegError {
     Other(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyState {
+    Present,
+    Absent,
+    Unreadable(String),
+}
+
 /// Read-only registry access with an explicit view on every call.
 pub trait RegRead: Sync {
     fn subkeys(&self, root: RegRoot, view: RegView, path: &str) -> Result<Vec<String>, RegError>;
     fn values(&self, root: RegRoot, view: RegView, path: &str) -> Result<BTreeMap<String, RegValue>, RegError>;
-    fn key_exists(&self, root: RegRoot, view: RegView, path: &str) -> bool {
-        self.values(root, view, path).is_ok()
+    /// Whether a key exists. Unlike a boolean, this keeps "could not tell"
+    /// distinct: an access failure must never be read as "absent".
+    fn key_state(&self, root: RegRoot, view: RegView, path: &str) -> KeyState {
+        match self.values(root, view, path) {
+            Ok(_) => KeyState::Present,
+            Err(RegError::NotFound) => KeyState::Absent,
+            Err(RegError::AccessDenied) => KeyState::Unreadable("access denied".into()),
+            Err(RegError::Other(e)) => KeyState::Unreadable(e),
+        }
     }
 }
 
@@ -88,6 +105,11 @@ pub struct KnownFolders {
     pub temp: Option<WinPath>,
     /// Sweep's own install/data directories.
     pub sweep_dirs: Vec<WinPath>,
+    /// Known Folders that exist but could not be resolved to a supported
+    /// local path (name, reason), e.g. redirected to a network share. These
+    /// are reported as coverage gaps; folders simply not defined on the
+    /// system are not listed here.
+    pub unresolved: Vec<(String, String)>,
 }
 
 impl KnownFolders {

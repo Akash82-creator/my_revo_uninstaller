@@ -1,18 +1,25 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { api, formatDate, onUninstallUpdate, type OpView, type Preview } from './api';
+  import { onMount } from 'svelte';
+  import { api, formatDate, type OpView, type Preview } from './api';
 
-  let { programId, onBack, onScan }: { programId: string; onBack: () => void; onScan: (scanId: string) => void } = $props();
+  let { programId, op, onStarted, onBack, onScan }: {
+    programId: string;
+    op: OpView | null;
+    onStarted: (op: OpView) => void;
+    onBack: () => void;
+    onScan: (scanId: string) => void;
+  } = $props();
 
   let preview = $state<Preview | null>(null);
   let error = $state<string | null>(null);
   let understood = $state(false);
   let ackUncertain = $state(false);
   let ackAnalyze = $state(false);
-  let op = $state<OpView | null>(null);
   let busy = $state(false);
-  let unlisten: (() => void) | null = null;
-  let autoScanStarted = false;
+  // Auto-scan only when the outcome arrives while this panel is open, not when
+  // revisiting an operation that finished earlier.
+  let sawUnfinished = false;
+  let autoScanStarted = $state(false);
 
   onMount(async () => {
     try {
@@ -20,29 +27,23 @@
     } catch (e) {
       error = String(e);
     }
-    unlisten = await onUninstallUpdate((v) => {
-      if (op && v.opId === op.opId) {
-        op = v;
-        maybeAutoScan();
-      }
-    });
   });
-  onDestroy(() => unlisten?.());
 
-  async function maybeAutoScan() {
-    if (op?.state === 'finished' && op.outcome?.autoScanAllowed && !autoScanStarted) {
+  $effect(() => {
+    if (!op) return;
+    if (op.state !== 'finished') sawUnfinished = true;
+    else if (sawUnfinished && op.outcome?.autoScanAllowed && !autoScanStarted) {
       autoScanStarted = true;
-      await scan(false);
+      scan(false);
     }
-  }
+  });
 
   async function run() {
     busy = true;
     error = null;
     try {
       const opId = await api.startUninstall(programId);
-      op = await api.getOperation(opId);
-      maybeAutoScan();
+      onStarted(await api.getOperation(opId));
     } catch (e) {
       error = String(e);
     } finally {
@@ -90,8 +91,38 @@
     </dl>
   </div>
 
-  {#if !op}
-    <div class="panel">
+  {#if op}
+    <div class="panel" data-testid="operation">
+      <h3>{stateLabel[op.state]}</h3>
+      {#if op.state === 'running' || op.state === 'launching'}
+        <progress></progress>
+        <p class="muted">Follow the uninstaller's own window. Tracking {op.pids.length} process(es).</p>
+        <button onclick={() => api.stopWaiting(op!.opId)}>Stop waiting</button>
+        <span class="muted">Use this if the uninstaller opened something that stays open (e.g. a browser).</span>
+      {/if}
+      {#if op.trackingIncomplete}
+        <div class="banner warn">Some uninstaller processes could not be tracked; the result is based on checks after they exited.</div>
+      {/if}
+      {#if op.outcome}
+        <div class="banner {op.outcome.kind === 'succeeded' ? 'ok' : op.outcome.kind === 'failed' ? 'bad' : 'warn'}" data-testid="outcome">
+          <strong>{op.outcome.label}.</strong> {op.outcome.detail}
+        </div>
+        {#if op.outcome.autoScanAllowed}
+          {#if autoScanStarted}
+            <p class="muted">Starting the read-only leftover scan…</p>
+          {:else}
+            <div class="actions"><button class="primary" onclick={() => scan(false)}>Scan for leftovers (read-only)</button></div>
+          {/if}
+        {:else}
+          <p>Because the outcome is not a confirmed success, Sweep does not scan automatically.</p>
+          <label><input type="checkbox" bind:checked={ackUncertain} /> Scan anyway; I understand the program may still be installed.</label>
+          <div class="actions"><button disabled={!ackUncertain} onclick={() => scan(true)}>Scan anyway (read-only)</button></div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+  {#if !op || op.state === 'finished'}
+    <div class="panel" data-testid="before-uninstall">
       <h3>Before you uninstall</h3>
       <div class="banner warn" data-testid="restore-point">
         <strong>Restore point: unavailable.</strong> {preview.restorePointNote}
@@ -111,31 +142,6 @@
       <p class="muted">Or look for related files and registry keys without uninstalling. Results describe the current installation and are read-only.</p>
       <label><input type="checkbox" bind:checked={ackAnalyze} /> The program is still installed; I understand results are only indicative.</label>
       <div class="actions"><button disabled={!ackAnalyze} onclick={() => scan(true)}>Analyze without uninstalling</button></div>
-    </div>
-  {:else}
-    <div class="panel" data-testid="operation">
-      <h3>{stateLabel[op.state]}</h3>
-      {#if op.state === 'running' || op.state === 'launching'}
-        <progress></progress>
-        <p class="muted">Follow the uninstaller's own window. Tracking {op.pids.length} process(es).</p>
-        <button onclick={() => api.stopWaiting(op!.opId)}>Stop waiting</button>
-        <span class="muted">Use this if the uninstaller opened something that stays open (e.g. a browser).</span>
-      {/if}
-      {#if op.trackingIncomplete}
-        <div class="banner warn">Some uninstaller processes could not be tracked; the result is based on checks after they exited.</div>
-      {/if}
-      {#if op.outcome}
-        <div class="banner {op.outcome.kind === 'succeeded' ? 'ok' : op.outcome.kind === 'failed' ? 'bad' : 'warn'}" data-testid="outcome">
-          <strong>{op.outcome.label}.</strong> {op.outcome.detail}
-        </div>
-        {#if op.outcome.autoScanAllowed}
-          <p class="muted">Starting the read-only leftover scan…</p>
-        {:else}
-          <p>Because the outcome is not a confirmed success, Sweep does not scan automatically.</p>
-          <label><input type="checkbox" bind:checked={ackUncertain} /> Scan anyway; I understand the program may still be installed.</label>
-          <div class="actions"><button disabled={!ackUncertain} onclick={() => scan(true)}>Scan anyway (read-only)</button></div>
-        {/if}
-      {/if}
     </div>
   {/if}
 {:else if !error}

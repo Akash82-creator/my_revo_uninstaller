@@ -100,15 +100,25 @@ pub fn plan_launch(
             })
         }
         UninstallCommand::Exe { exe, args } => {
+            // Only `requireAdministrator` guarantees an administrator token.
+            // `highestAvailable` gives a standard user their *standard* token
+            // without any prompt, so it is treated like asInvoker here.
             let (verb, reason) = match (scope, manifest_level, sweep_elevated) {
                 (Scope::User, Some(ExecutionLevel::RequireAdministrator), _) => (
                     Verb::Open,
-                    "Per-user program whose uninstaller requests administrator rights; Windows will prompt.".to_string(),
+                    "Per-user program whose uninstaller requires administrator rights; Windows will ask for approval."
+                        .to_string(),
+                ),
+                (Scope::User, Some(ExecutionLevel::HighestAvailable), _) => (
+                    Verb::Open,
+                    "Per-user program: runs as you. Its manifest asks for the highest rights available, so an \
+                     administrator may see a prompt; a standard user runs it without one."
+                        .to_string(),
                 ),
                 (Scope::User, _, _) => (Verb::Open, "Per-user program: runs as you, without elevation.".to_string()),
-                (Scope::Machine, Some(ExecutionLevel::RequireAdministrator | ExecutionLevel::HighestAvailable), _) => (
+                (Scope::Machine, Some(ExecutionLevel::RequireAdministrator), _) => (
                     Verb::Open,
-                    "The uninstaller's manifest requests elevation; Windows will ask for approval.".to_string(),
+                    "The uninstaller's manifest requires administrator rights; Windows will ask for approval.".to_string(),
                 ),
                 (Scope::Machine, _, true) => (
                     Verb::Open,
@@ -117,9 +127,13 @@ pub fn plan_launch(
                 (Scope::Machine, level, false) => (
                     Verb::RunAs,
                     format!(
-                        "Per-machine program and the uninstaller {}; Windows will ask for administrator approval for the uninstaller only.",
+                        "Per-machine program and the uninstaller {}; Sweep asks Windows to elevate the uninstaller only \
+                         (a standard user is asked for administrator credentials).",
                         match level {
                             Some(ExecutionLevel::AsInvoker) => "declares asInvoker",
+                            Some(ExecutionLevel::HighestAvailable) => {
+                                "declares highestAvailable, which does not guarantee administrator rights"
+                            }
                             _ => "has no readable elevation manifest",
                         }
                     ),
@@ -151,6 +165,23 @@ mod tests {
     }
 
     #[test]
+    fn standard_user_highest_available_machine_uninstaller_uses_runas() {
+        // For a standard user, highestAvailable runs with the standard token and
+        // no prompt; a per-machine uninstaller would then fail. Sweep must
+        // request elevation explicitly and must not claim the manifest does it.
+        let exe = UninstallCommand::Exe { exe: wp("C:\\P\\u.exe"), args: String::new() };
+        let sys = wp("C:\\Windows\\System32");
+        let p = plan_launch(&exe, Scope::Machine, false, Some(ExecutionLevel::HighestAvailable), Some(&sys)).unwrap();
+        assert_eq!(p.verb, Verb::RunAs);
+        assert!(!p.reason.contains("manifest requires"), "{}", p.reason);
+        assert!(p.reason.contains("does not guarantee administrator rights"));
+        // Only requireAdministrator relies on the manifest.
+        let p =
+            plan_launch(&exe, Scope::Machine, false, Some(ExecutionLevel::RequireAdministrator), Some(&sys)).unwrap();
+        assert_eq!(p.verb, Verb::Open);
+    }
+
+    #[test]
     fn launch_matrix() {
         let exe = UninstallCommand::Exe { exe: wp("C:\\P\\u.exe"), args: "/S".into() };
         let sys = wp("C:\\Windows\\System32");
@@ -163,6 +194,10 @@ mod tests {
         assert_eq!(p.verb, Verb::Open);
         let p = plan_launch(&exe, Scope::User, false, None, Some(&sys)).unwrap();
         assert_eq!(p.verb, Verb::Open);
+        assert_eq!(p.params, "/S");
+        let p = plan_launch(&exe, Scope::User, false, Some(ExecutionLevel::HighestAvailable), Some(&sys)).unwrap();
+        assert_eq!(p.verb, Verb::Open);
+        assert!(p.reason.contains("standard user runs it without one"));
         assert_eq!(p.params, "/S");
         assert_eq!(
             plan_launch(&exe, Scope::User, true, None, Some(&sys)),

@@ -21,6 +21,12 @@ pub enum CoverageStatus {
     AccessDenied,
     ReparsePointNotFollowed,
     LimitReached,
+    /// The path resolves elsewhere (an ancestor is a junction/symlink or a
+    /// mount point). Not followed; the resolved location is given.
+    Redirected(String),
+    /// A Known Folder could not be resolved (e.g. redirected to a network
+    /// share), so its contents were not examined.
+    NotResolved(String),
     Error(String),
     Cancelled,
 }
@@ -111,10 +117,15 @@ struct Run<'a, 'b> {
     on_progress: &'b mut dyn FnMut(&Progress),
 }
 
+fn unrepresentable() -> CoverageStatus {
+    CoverageStatus::Error("name cannot be represented as a Win32 path (e.g. trailing dot or space)".into())
+}
+
 fn fs_status(e: &FsError) -> CoverageStatus {
     match e {
         FsError::NotFound => CoverageStatus::NotPresent,
         FsError::AccessDenied => CoverageStatus::AccessDenied,
+        FsError::Redirected(to) => CoverageStatus::Redirected(to.clone()),
         FsError::Other(m) => CoverageStatus::Error(m.clone()),
     }
 }
@@ -187,6 +198,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 self.tick(1);
                 let Ok(child) = dir.join(&e.name) else {
                     st.unreadable.push(format!("{dir}\\{}", e.name));
+                    self.cover(format!("{dir}\\{}", e.name), unrepresentable());
                     continue;
                 };
                 if e.meta.is_reparse {
@@ -281,12 +293,18 @@ impl<'a, 'b> Run<'a, 'b> {
                 self.cover(format!("{label}: {root} (remaining entries)"), CoverageStatus::Cancelled);
                 break;
             }
-            let Ok(child) = root.join(&e.name) else { continue };
+            let Ok(child) = root.join(&e.name) else {
+                self.cover(format!("{root}\\{}", e.name), unrepresentable());
+                continue;
+            };
             match m.match_top(&e.name) {
                 Some(NameMatch::Publisher) if e.meta.is_dir && !e.meta.is_reparse => {
                     self.publisher_folder(&child, label);
                 }
-                Some(NameMatch::Publisher) => {}
+                Some(NameMatch::Publisher) => {
+                    // A junction/symlink named like the publisher: not entered.
+                    self.cover(child.to_string(), CoverageStatus::ReparsePointNotFollowed);
+                }
                 Some(k) => {
                     let why = format!("{} ({label})", k.describe());
                     self.path_candidate(&child, &why, None);
@@ -310,15 +328,30 @@ impl<'a, 'b> Run<'a, 'b> {
         for e in &list {
             self.tick(1);
             if let Some(k) = m.match_under_publisher(&e.name) {
-                if let Ok(child) = dir.join(&e.name) {
-                    matched += 1;
-                    let why = format!("{} ({label})", k.describe());
-                    self.path_candidate(&child, &why, None);
+                match dir.join(&e.name) {
+                    Ok(child) => {
+                        matched += 1;
+                        let why = format!("{} ({label})", k.describe());
+                        self.path_candidate(&child, &why, None);
+                    }
+                    Err(_) => self.cover(format!("{dir}\\{}", e.name), unrepresentable()),
                 }
             }
         }
         // The publisher folder itself: always Review, never recursive.
         let mut c = Candidate::new(Target::Path { path: dir.clone(), is_dir: true });
+        // Re-check after listing: it may have been replaced meanwhile.
+        match self.s.fs.metadata(dir) {
+            Ok(m) if m.is_reparse => {
+                c.concerns.push("replaced by a junction/symlink during the scan; not followed".into());
+                self.cover(dir.to_string(), CoverageStatus::ReparsePointNotFollowed);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                c.concerns.push(format!("could not be re-examined: {e:?}"));
+                self.cover(dir.to_string(), fs_status(&e));
+            }
+        }
         c.discovered_by.push(format!("{} ({label})", NameMatch::Publisher.describe()));
         let siblings = list.len().saturating_sub(matched);
         c.shared.push("publisher folder: would only ever be removed if empty, never recursively".into());
@@ -435,7 +468,15 @@ impl<'a, 'b> Run<'a, 'b> {
             for name in subs {
                 self.tick(1);
                 let path = format!("{APP_PATHS_PATH}\\{name}");
-                let Ok(vals) = self.s.reg.values(root, view, &path) else { continue };
+                let vals = match self.s.reg.values(root, view, &path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // An unreadable registration could point into the
+                        // install folder; record it rather than skip it.
+                        self.cover(RegKeyRef { root, view, path }.to_string(), reg_status(&e));
+                        continue;
+                    }
+                };
                 let target = vals.get("").and_then(|v| v.as_str()).map(crate::evidence::icon_path);
                 if let Some(Ok(p)) = target.map(WinPath::parse_external) {
                     if p.is_within(&dir) {
@@ -496,14 +537,22 @@ impl<'a> Scanner<'a> {
             (&k.desktop, "Desktop"),
             (&k.common_desktop, "Public Desktop"),
         ];
+        for (name, why) in &k.unresolved {
+            r.cover(format!("Known Folder {name}"), CoverageStatus::NotResolved(why.clone()));
+        }
         let mut seen: Vec<WinPath> = vec![];
         for (root, label) in roots {
-            if let Some(root) = root {
-                if seen.contains(root) {
-                    continue;
+            match root {
+                Some(root) => {
+                    if seen.contains(root) {
+                        continue;
+                    }
+                    seen.push(root.clone());
+                    r.scan_root(root, label);
                 }
-                seen.push(root.clone());
-                r.scan_root(root, label);
+                // Unresolved folders are reported above; otherwise the folder
+                // is not defined on this system.
+                None => r.cover(format!("{label}: not defined on this system"), CoverageStatus::NotPresent),
             }
         }
 

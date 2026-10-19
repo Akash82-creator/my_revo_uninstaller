@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "start_uninstall",
     "stop_waiting",
     "get_operation",
+    "list_operations",
     "start_scan",
     "cancel_scan",
     "get_scan",

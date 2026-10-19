@@ -1,6 +1,7 @@
 //! `sweep-fixture`: a controlled fake application for Windows tests.
 //!
 //! install   --name N --publisher P --scope user|machine [--mode M] [--junction SENTINEL_DIR]
+//!           [--install-root DIR]   (install under DIR\<P>\<N> instead of the default)
 //! uninstall --name N --publisher P --scope user|machine --mode ok|fail|leave-entry|spawn-child
 //!
 //! Known artifacts written by `install` (user scope shown):
@@ -39,6 +40,7 @@ mod win {
         machine: bool,
         mode: String,
         junction: Option<String>,
+        install_root: Option<String>,
     }
 
     fn arg(args: &[String], k: &str) -> Option<String> {
@@ -52,6 +54,7 @@ mod win {
             machine: arg(args, "--scope").as_deref() == Some("machine"),
             mode: arg(args, "--mode").unwrap_or_else(|| "ok".into()),
             junction: arg(args, "--junction"),
+            install_root: arg(args, "--install-root"),
         }
     }
 
@@ -60,7 +63,11 @@ mod win {
     }
 
     fn install_dir(o: &Opts) -> PathBuf {
-        let root = if o.machine { base(true, "") } else { base(false, "LOCALAPPDATA").join("Programs") };
+        let root = match &o.install_root {
+            Some(r) => PathBuf::from(r),
+            None if o.machine => base(true, ""),
+            None => base(false, "LOCALAPPDATA").join("Programs"),
+        };
         root.join(&o.publisher).join(&o.name)
     }
 
@@ -119,11 +126,12 @@ mod win {
         k.set_value(
             "UninstallString",
             &format!(
-                "\"{}\" uninstall --name \"{}\" --publisher \"{}\" --scope {scope} --mode {}",
+                "\"{}\" uninstall --name \"{}\" --publisher \"{}\" --scope {scope} --mode {}{}",
                 unins.display(),
                 o.name,
                 o.publisher,
-                o.mode
+                o.mode,
+                o.install_root.as_ref().map(|r| format!(" --install-root \"{r}\"")).unwrap_or_default()
             ),
         )
         .unwrap();

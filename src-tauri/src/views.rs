@@ -179,6 +179,12 @@ pub fn outcome(o: &Outcome) -> OutcomeView {
                 UnknownReason::NotInstalled => "Windows Installer reports the product was not installed.",
                 UnknownReason::ProductStillInstalled => "Windows Installer still reports the product as installed.",
                 UnknownReason::ExitCodeUnavailable => "The uninstaller's result could not be read.",
+                UnknownReason::EntryUnreadable => {
+                    "The program's registry entry could not be read, so its removal cannot be confirmed."
+                }
+                UnknownReason::TrackingIncomplete => {
+                    "Not every uninstaller process was followed to completion (or you stopped waiting); it may still be running."
+                }
             }
             .into(),
         ),
@@ -190,6 +196,7 @@ pub fn outcome(o: &Outcome) -> OutcomeView {
 #[serde(rename_all = "camelCase")]
 pub struct OpView {
     pub op_id: String,
+    pub program_id: String,
     pub program_name: String,
     pub state: &'static str,
     pub pids: Vec<u32>,
@@ -197,7 +204,7 @@ pub struct OpView {
     pub outcome: Option<OutcomeView>,
 }
 
-pub fn op(op_id: &str, program_name: &str, st: &UninstallState) -> OpView {
+pub fn op(op_id: &str, program_id: &str, program_name: &str, st: &UninstallState) -> OpView {
     let (state, pids, inc, out) = match st {
         UninstallState::Ready => ("ready", vec![], false, None),
         UninstallState::Launching => ("launching", vec![], false, None),
@@ -209,6 +216,7 @@ pub fn op(op_id: &str, program_name: &str, st: &UninstallState) -> OpView {
     };
     OpView {
         op_id: op_id.into(),
+        program_id: program_id.into(),
         program_name: program_name.into(),
         state,
         pids,
@@ -304,6 +312,10 @@ pub fn report(r: &ScanReport, uncertain: bool) -> ReportView {
                     CoverageStatus::AccessDenied => ("access denied", None),
                     CoverageStatus::ReparsePointNotFollowed => ("junction/symlink not followed", None),
                     CoverageStatus::LimitReached => ("size/depth limit reached", None),
+                    CoverageStatus::Redirected(to) => {
+                        ("resolves elsewhere (junction/symlink/mount point); not followed", Some(to.clone()))
+                    }
+                    CoverageStatus::NotResolved(why) => ("Known Folder could not be resolved", Some(why.clone())),
                     CoverageStatus::Error(e) => ("error", Some(e.clone())),
                     CoverageStatus::Cancelled => ("cancelled", None),
                 };

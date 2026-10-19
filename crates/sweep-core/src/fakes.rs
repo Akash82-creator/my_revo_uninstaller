@@ -12,12 +12,24 @@ fn wp(s: &str) -> WinPath {
     WinPath::parse_external(s).expect("fake path")
 }
 
+type Hook = Box<dyn FnMut(&WinPath, &FakeFs) + Send>;
+
+/// A junction/symlink: listed as a reparse point. Paths *through* it resolve
+/// to `target` and are reported as `FsError::Redirected` (Windows behaviour
+/// once the final path is checked), never silently followed.
 #[derive(Default)]
 pub struct FakeFs {
-    nodes: BTreeMap<String, (WinPath, EntryMeta)>,
-    denied: BTreeSet<String>,
-    /// Hook run on every read_dir (used to cancel mid-scan in tests).
-    pub on_read_dir: Mutex<Option<Box<dyn FnMut(&WinPath) + Send>>>,
+    nodes: Mutex<BTreeMap<String, (WinPath, EntryMeta, Option<String>)>>,
+    denied: Mutex<BTreeSet<String>>,
+    /// Hook run before every read_dir (used to cancel mid-scan in tests).
+    pub on_read_dir: Mutex<Option<Hook>>,
+    /// Hook run after every successful read_dir listing (used to change the
+    /// tree between listing and inspection: replacement-race tests).
+    pub after_read_dir: Mutex<Option<Hook>>,
+}
+
+fn dir_meta() -> EntryMeta {
+    EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: Some(0) }
 }
 
 impl FakeFs {
@@ -25,44 +37,76 @@ impl FakeFs {
         Self::default()
     }
 
-    fn ensure_parents(&mut self, p: &WinPath) {
+    fn insert(&self, p: WinPath, meta: EntryMeta, target: Option<String>) {
+        let mut nodes = self.nodes.lock().unwrap();
         let mut cur = p.parent();
         while let Some(d) = cur {
             if d.is_root() {
                 break;
             }
-            self.nodes.entry(d.key()).or_insert_with(|| {
-                (d.clone(), EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: Some(0) })
-            });
+            nodes.entry(d.key()).or_insert_with(|| (d.clone(), dir_meta(), None));
             cur = d.parent();
         }
+        nodes.insert(p.key(), (p, meta, target));
     }
 
     pub fn dir(&mut self, path: &str) -> &mut Self {
-        let p = wp(path);
-        self.ensure_parents(&p);
-        self.nodes.insert(p.key(), (p, EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: Some(0) }));
+        self.insert(wp(path), dir_meta(), None);
         self
     }
 
     pub fn file(&mut self, path: &str, size: u64, modified: i64) -> &mut Self {
-        let p = wp(path);
-        self.ensure_parents(&p);
-        self.nodes.insert(p.key(), (p, EntryMeta { is_dir: false, is_reparse: false, size, modified: Some(modified) }));
+        self.insert(wp(path), EntryMeta { is_dir: false, is_reparse: false, size, modified: Some(modified) }, None);
         self
     }
 
-    /// A junction: listed as a reparse point; its target is never visible.
+    /// A junction pointing at `target` (only used for reporting).
     pub fn junction(&mut self, path: &str) -> &mut Self {
-        let p = wp(path);
-        self.ensure_parents(&p);
-        self.nodes.insert(p.key(), (p, EntryMeta { is_dir: true, is_reparse: true, size: 0, modified: Some(0) }));
+        self.junction_to(path, "C:\\elsewhere");
         self
+    }
+
+    pub fn junction_to(&self, path: &str, target: &str) {
+        self.insert(
+            wp(path),
+            EntryMeta { is_dir: true, is_reparse: true, size: 0, modified: Some(0) },
+            Some(target.into()),
+        );
+    }
+
+    /// Replace an existing directory with a junction at runtime (race tests).
+    /// Its previous children stay in the map but become unreachable.
+    pub fn replace_with_junction(&self, path: &str, target: &str) {
+        self.junction_to(path, target);
     }
 
     pub fn deny(&mut self, path: &str) -> &mut Self {
-        self.denied.insert(wp(path).key());
+        self.denied.lock().unwrap().insert(wp(path).key());
         self
+    }
+
+    /// If a strict ancestor of `path` is a reparse point, where it leads.
+    fn redirected(&self, path: &WinPath) -> Option<String> {
+        let nodes = self.nodes.lock().unwrap();
+        let mut cur = path.parent();
+        while let Some(d) = cur {
+            if let Some((_, m, target)) = nodes.get(&d.key()) {
+                if m.is_reparse {
+                    let rest = &path.components()[d.components().len()..];
+                    return Some(format!("{}\\{}", target.clone().unwrap_or_default(), rest.join("\\")));
+                }
+            }
+            cur = d.parent();
+        }
+        None
+    }
+
+    fn run_hook(&self, hook: &Mutex<Option<Hook>>, path: &WinPath) {
+        let taken = hook.lock().unwrap().take();
+        if let Some(mut h) = taken {
+            h(path, self);
+            *hook.lock().unwrap() = Some(h);
+        }
     }
 }
 
@@ -71,14 +115,15 @@ impl FsRead for FakeFs {
         if path.is_root() {
             return Ok(EntryMeta { is_dir: true, is_reparse: false, size: 0, modified: None });
         }
-        self.nodes.get(&path.key()).map(|(_, m)| m.clone()).ok_or(FsError::NotFound)
+        if let Some(to) = self.redirected(path) {
+            return Err(FsError::Redirected(to));
+        }
+        self.nodes.lock().unwrap().get(&path.key()).map(|(_, m, _)| m.clone()).ok_or(FsError::NotFound)
     }
 
     fn read_dir(&self, path: &WinPath) -> Result<Vec<DirEntry>, FsError> {
-        if let Some(h) = self.on_read_dir.lock().unwrap().as_mut() {
-            h(path);
-        }
-        if self.denied.contains(&path.key()) {
+        self.run_hook(&self.on_read_dir, path);
+        if self.denied.lock().unwrap().contains(&path.key()) {
             return Err(FsError::AccessDenied);
         }
         let meta = self.metadata(path)?;
@@ -88,12 +133,16 @@ impl FsRead for FakeFs {
         if meta.is_reparse {
             return Err(FsError::Other("refusing to list through a reparse point".into()));
         }
-        Ok(self
+        let list = self
             .nodes
+            .lock()
+            .unwrap()
             .values()
-            .filter(|(p, _)| p.parent().as_ref() == Some(path))
-            .map(|(p, m)| DirEntry { name: p.file_name().unwrap().to_string(), meta: m.clone() })
-            .collect())
+            .filter(|(p, _, _)| p.parent().as_ref() == Some(path))
+            .map(|(p, m, _)| DirEntry { name: p.file_name().unwrap().to_string(), meta: m.clone() })
+            .collect();
+        self.run_hook(&self.after_read_dir, path);
+        Ok(list)
     }
 }
 
@@ -196,5 +245,6 @@ pub fn known_folders() -> KnownFolders {
         one_drive: o("C:\\Users\\alice\\OneDrive"),
         temp: o("C:\\Users\\alice\\AppData\\Local\\Temp"),
         sweep_dirs: vec![wp("C:\\Program Files\\Sweep")],
+        unresolved: vec![],
     }
 }

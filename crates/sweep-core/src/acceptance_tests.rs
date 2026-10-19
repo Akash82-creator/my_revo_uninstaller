@@ -252,7 +252,7 @@ fn scan_cancellation_partial_report() {
     let snap = snapshot(&w, "Acme Notes");
     let token = CancelToken::default();
     let t2 = token.clone();
-    *w.fs.on_read_dir.lock().unwrap() = Some(Box::new(move |p: &WinPath| {
+    *w.fs.on_read_dir.lock().unwrap() = Some(Box::new(move |p: &WinPath, _: &FakeFs| {
         if *p == WinPath::parse_external("C:\\ProgramData").unwrap() {
             t2.cancel();
         }
@@ -334,4 +334,149 @@ fn progress_is_reported() {
     assert!(phases.iter().any(|p| p.contains("Program Files")));
     assert_eq!(phases.last().unwrap(), "Done");
     assert!(r.items_visited > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for review findings (commit 64a44e8)
+// ---------------------------------------------------------------------------
+
+fn redirected(r: &ScanReport) -> Vec<String> {
+    r.coverage
+        .iter()
+        .filter(|c| matches!(c.status, CoverageStatus::Redirected(_)))
+        .map(|c| c.location.clone())
+        .collect()
+}
+
+#[test]
+fn ancestor_junction_not_followed() {
+    // C:\Program Files\Acme is a junction; the install dir below it looks
+    // like an ordinary directory but resolves elsewhere.
+    let w = world();
+    w.fs.replace_with_junction("C:\\Program Files\\Acme", "E:\\Elsewhere\\Acme");
+    let r = scan(&w, "Acme Notes");
+    assert!(find(&r, "C:\\Program Files\\Acme\\Notes").is_none(), "no candidate through a junction");
+    assert!(r.candidates.iter().all(|c| !c.ownership.contains(&Ownership::IsInstallDir)));
+    let red = redirected(&r);
+    assert!(red.iter().any(|l| l.eq_ignore_ascii_case("C:\\Program Files\\Acme\\Notes")), "{red:?}");
+    // The publisher entry in the root listing is a junction: reported, not entered.
+    assert!(r
+        .coverage
+        .iter()
+        .any(|c| c.location.ends_with("Program Files\\Acme") && c.status == CoverageStatus::ReparsePointNotFollowed));
+    assert!(!r.complete);
+}
+
+#[test]
+fn ancestor_replaced_by_junction_during_scan() {
+    // Race: after the publisher folder is listed, it is swapped for a junction
+    // before its product subfolder is inspected.
+    let w = world();
+    *w.fs.after_read_dir.lock().unwrap() = Some(Box::new(|p: &WinPath, fs: &FakeFs| {
+        if *p == wp("C:\\Users\\alice\\AppData\\Roaming\\Acme") {
+            fs.replace_with_junction("C:\\Users\\alice\\AppData\\Roaming\\Acme", "E:\\Other");
+        }
+    }));
+    let r = scan(&w, "Acme Notes");
+    assert!(find(&r, "C:\\Users\\alice\\AppData\\Roaming\\Acme\\Notes").is_none());
+    assert!(redirected(&r).iter().any(|l| l.contains("Roaming\\Acme\\Notes")));
+    let publ = find(&r, "C:\\Users\\alice\\AppData\\Roaming\\Acme").unwrap();
+    assert_ne!(publ.verdict, Verdict::Likely);
+    assert!(publ.concerns.iter().any(|c| c.contains("junction")), "{:?}", publ.concerns);
+    assert!(!r.complete);
+}
+
+#[test]
+fn final_component_replaced_by_junction_during_scan() {
+    let w = world();
+    *w.fs.after_read_dir.lock().unwrap() = Some(Box::new(|p: &WinPath, fs: &FakeFs| {
+        if *p == wp("C:\\Program Files (x86)") {
+            fs.replace_with_junction("C:\\Program Files (x86)\\AcmeNotes", "C:\\Windows");
+        }
+    }));
+    let r = scan(&w, "Acme Notes");
+    let c = find(&r, "C:\\Program Files (x86)\\AcmeNotes").unwrap();
+    assert_eq!(c.verdict, Verdict::Review);
+    assert!(c.stats.is_none(), "junction target was not walked");
+    assert!(r
+        .coverage
+        .iter()
+        .any(|e| e.location.contains("AcmeNotes") && e.status == CoverageStatus::ReparsePointNotFollowed));
+}
+
+#[test]
+fn subdirectory_replaced_during_tree_walk() {
+    let mut w = world();
+    w.fs.file("C:\\Program Files\\Acme\\Notes\\bin\\x.dll", 1, BEFORE_INSTALL);
+    *w.fs.after_read_dir.lock().unwrap() = Some(Box::new(|p: &WinPath, fs: &FakeFs| {
+        if *p == wp("C:\\Program Files\\Acme\\Notes") {
+            fs.replace_with_junction("C:\\Program Files\\Acme\\Notes\\bin", "C:\\Windows\\System32");
+        }
+    }));
+    let r = scan(&w, "Acme Notes");
+    let c = find(&r, "C:\\Program Files\\Acme\\Notes").unwrap();
+    assert_eq!(c.verdict, Verdict::Review, "changed during scan: not Likely");
+    assert!(!r.complete);
+}
+
+#[test]
+fn unreadable_app_paths_value_is_a_coverage_gap() {
+    let mut w = world();
+    let key = format!("{APP_PATHS_PATH}\\notes.exe");
+    w.reg.deny(RegRoot::Hklm, RegView::Reg64, &key);
+    let r = scan(&w, "Acme Notes");
+    assert!(!r.complete);
+    assert!(r.gaps().any(|g| g.location.contains("App Paths\\notes.exe") && g.status == CoverageStatus::AccessDenied));
+}
+
+#[test]
+fn unresolved_known_folder_is_a_coverage_gap() {
+    let mut w = world();
+    w.known.roaming_app_data = None;
+    w.known.unresolved.push(("RoamingAppData".into(), "redirected to \\\\server\\profiles (unsupported)".into()));
+    w.known.common_desktop = None; // simply not defined: not a gap
+    let r = scan(&w, "Acme Notes");
+    assert!(!r.complete);
+    let gaps: Vec<_> = r.gaps().map(|g| g.location.clone()).collect();
+    assert!(gaps.iter().any(|g| g.contains("RoamingAppData")), "{gaps:?}");
+    assert!(!gaps.iter().any(|g| g.contains("Public Desktop")), "{gaps:?}");
+    assert!(r.coverage.iter().any(|c| c.location.contains("Public Desktop") && c.status == CoverageStatus::NotPresent));
+}
+
+#[test]
+fn other_build_in_other_view_is_protected() {
+    // 64-bit and 32-bit builds share a key name; they stay distinct programs
+    // and each protects the other's folder.
+    let mut w = world();
+    let mk = |view, dir: &str| UninstallEntry {
+        scope: Scope::Machine,
+        view,
+        key_name: "Tool".into(),
+        values: [
+            ("DisplayName", "Acme Tool"),
+            ("Publisher", "Tool Makers"),
+            ("InstallLocation", dir),
+            ("UninstallString", "x"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), sz(v)))
+        .collect(),
+    };
+    w.inv = build_inventory(
+        vec![
+            mk(RegView::Reg64, "C:\\Program Files\\Acme Tool"),
+            mk(RegView::Reg32, "C:\\Program Files (x86)\\Acme Tool"),
+        ],
+        vec![],
+    );
+    w.fs.file("C:\\Program Files\\Acme Tool\\t.exe", 1, BEFORE_INSTALL);
+    w.fs.file("C:\\Program Files (x86)\\Acme Tool\\t.exe", 1, BEFORE_INSTALL);
+    assert_eq!(w.inv.programs.len(), 2);
+    let p64 = w.inv.programs.iter().find(|p| p.sources[0].view == RegView::Reg64).unwrap().clone();
+    let env = |_: &str| None;
+    let snap = take_snapshot(&p64, &w.inv, &SnapshotEnv { known: &w.known, fs: &w.fs, env: &env });
+    assert!(snap.other_program_dirs.iter().any(|(d, _)| *d == wp("C:\\Program Files (x86)\\Acme Tool")));
+    let r = scan_with(&w, &snap, CancelToken::default());
+    assert_eq!(find(&r, "C:\\Program Files\\Acme Tool").unwrap().verdict, Verdict::Likely);
+    assert_eq!(find(&r, "C:\\Program Files (x86)\\Acme Tool").unwrap().verdict, Verdict::Blocked);
 }

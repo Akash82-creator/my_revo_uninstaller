@@ -67,14 +67,13 @@ The GNU cross-build puts `WebView2Loader.dll` next to `sweep.exe`; ship both.
 
 | Suite | Environment | Status |
 |---|---|---|
-| `sweep-core` unit and acceptance tests (43) | Linux, fakes with Windows semantics | **Run: 43 passed** |
-| Workspace type-check and release build for `x86_64-pc-windows-gnu` | Linux + mingw | **Run: builds; `sweep.exe` embeds an `asInvoker` manifest** |
-| UI type-check (`svelte-check`) and build | Linux | **Run: 0 errors** |
-| UI smoke tests (2) | Linux headless Chromium, **mocked** backend | **Run: 2 passed** |
-| `stage_a_windows` (6) | **Wine** on Linux (not Windows) | **Run: 5 passed, 1 failed.** The junction test fails because Wine's `mklink /J` can't create the junction. Not Windows evidence. |
-| `stage_a_windows` (6) | Windows CI (`windows-latest`) | **Planned**, not run (no remote) |
+| `sweep-core` unit and acceptance tests (56) | Linux, fakes with Windows semantics | **Run: 56 passed** |
+| Workspace type-check for `x86_64-pc-windows-gnu` | Linux + mingw | **Run: 0 warnings, 0 errors** |
+| UI type-check (`svelte-check`) and build | Linux | **Run: 0 errors, 0 warnings** |
+| UI smoke tests (4) | Linux headless Chromium, **mocked** backend | **Run: 4 passed** (the 2 navigation tests fail against the pre-fix UI) |
+| `stage_a_windows` (9) | **Wine** on Linux (not Windows) | **Run: 6 passed, 3 failed.** All 3 failures are the junction tests: Wine's `mklink /J` can't create junctions. Not Windows evidence. |
+| `stage_a_windows` (9) | Windows CI (`windows-latest`) | Runs on every push and PR; see the Actions tab |
 | VM suite (`tests/vm`) | Disposable Windows VMs | **Planned**, not run |
-| Windows MSVC build | — | Not run: the MSVC SDK download is blocked in the dev container. CI uses MSVC. |
 
 ## What is mocked, stubbed or unsupported in Stage A
 - **Mocked:**
@@ -101,7 +100,14 @@ The GNU cross-build puts `WebView2Loader.dll` next to `sweep.exe`; ship both.
   - Registry values containing 8.3 short names (`PROGRA~1`) are not expanded,
     so they don't count as evidence. This is safe but can miss ownership.
   - On-disk names with trailing dots or spaces can't be examined (Win32
-    normalisation). They show up as missing, not as a coverage gap.
+    normalisation). They are reported as coverage gaps.
+  - Paths whose resolved location differs from the requested one (because
+    an ancestor is a junction, symlink or mount point, or the path uses 8.3
+    short names) are reported as "resolves elsewhere" gaps. They are not
+    examined.
+  - Unreadable registry entries make the outcome "uncertain". Elevated
+    uninstall verification for keys the user can't read is not available
+    until the Stage B helper exists.
   - Registry symbolic links are followed when read.
   - Descendant tracking can miss children of processes Sweep can't open. This
     is reported as "tracking incomplete".

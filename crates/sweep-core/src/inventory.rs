@@ -2,9 +2,8 @@
 
 use crate::model::{EntrySource, InstalledProgram, RegView, Scope, UninstallEntry};
 use crate::msi;
-use crate::winpath::fold;
+use crate::winpath::{fold, WinPath};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HiddenReason {
@@ -123,14 +122,47 @@ pub fn read_entries(reg: &dyn crate::api::RegRead) -> (Vec<UninstallEntry>, Vec<
     (out, unreadable)
 }
 
+fn same_text(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => fold(x.trim()) == fold(y.trim()),
+        _ => false,
+    }
+}
+
+fn same_location(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a.map(WinPath::parse_external), b.map(WinPath::parse_external)) {
+        (Some(Ok(x)), Some(Ok(y))) => x == y,
+        _ => same_text(a, b),
+    }
+}
+
+/// Two entries describe the *same* installation only when everything that
+/// identifies an installation matches. A shared key name or ProductCode
+/// alone is not enough: 32-bit and 64-bit builds of a product commonly use
+/// the same key name in their respective registry views.
+fn same_installation(a: &UninstallEntry, b: &UninstallEntry) -> bool {
+    let code_a = msi::parse_product_code(&a.key_name);
+    let code_b = msi::parse_product_code(&b.key_name);
+    let linked = fold(&a.key_name) == fold(&b.key_name) || (code_a.is_some() && code_a == code_b);
+    a.scope == b.scope
+        && linked
+        && same_text(a.str("DisplayName"), b.str("DisplayName"))
+        && same_text(a.str("DisplayVersion"), b.str("DisplayVersion"))
+        && same_text(a.str("UninstallString"), b.str("UninstallString"))
+        && same_text(a.str("QuietUninstallString"), b.str("QuietUninstallString"))
+        && same_location(a.str("InstallLocation"), b.str("InstallLocation"))
+}
+
 /// Filter and de-duplicate raw entries.
 ///
-/// De-duplication: entries with the same scope and key name in both HKLM
-/// views are merged (64-bit view preferred), then entries sharing a
-/// ProductCode within the same scope are merged.
+/// Every visible entry is its own program unless another entry is provably
+/// the same installation (see [`same_installation`]), e.g. a registration
+/// mirrored identically into both HKLM views. Merged programs list every
+/// source; the 64-bit view is preferred as the primary entry.
 pub fn build_inventory(entries: Vec<UninstallEntry>, unreadable: Vec<String>) -> Inventory {
     let mut hidden = Vec::new();
-    let mut by_key: BTreeMap<(Scope, String), InstalledProgram> = BTreeMap::new();
+    let mut programs: Vec<InstalledProgram> = Vec::new();
     let mut sorted = entries;
     // Deterministic preference: 64-bit view first.
     sorted.sort_by_key(|a| (a.scope, a.view, fold(&a.key_name)));
@@ -142,26 +174,13 @@ pub fn build_inventory(entries: Vec<UninstallEntry>, unreadable: Vec<String>) ->
             });
             continue;
         }
-        let k = (e.scope, fold(&e.key_name));
         let source = EntrySource { scope: e.scope, view: e.view, key_name: e.key_name.clone() };
-        match by_key.get_mut(&k) {
+        match programs.iter_mut().find(|q| same_installation(&q.entry, &e)) {
             Some(existing) => existing.sources.push(source),
-            None => {
-                by_key.insert(k, to_program(e));
-            }
+            None => programs.push(to_program(e)),
         }
     }
-    let mut programs: Vec<InstalledProgram> = Vec::new();
-    for p in by_key.into_values() {
-        let dup = p.product_code.as_ref().and_then(|code| {
-            programs.iter().position(|q| q.scope == p.scope && q.product_code.as_deref() == Some(code.as_str()))
-        });
-        match dup {
-            Some(i) => programs[i].sources.extend(p.sources),
-            None => programs.push(p),
-        }
-    }
-    programs.sort_by_key(|a| fold(&a.display_name));
+    programs.sort_by(|a, b| fold(&a.display_name).cmp(&fold(&b.display_name)).then_with(|| a.id.cmp(&b.id)));
     Inventory { programs, hidden, unreadable }
 }
 
@@ -264,7 +283,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn msi_product_code_dedup_within_scope() {
+    fn distinct_installations_across_views_kept_separate() {
+        // Same key name in both HKLM views, different builds: two programs.
+        let inv = build_inventory(
+            vec![
+                entry(
+                    Scope::Machine,
+                    RegView::Reg64,
+                    "Tool",
+                    &[
+                        ("DisplayName", sz("Tool")),
+                        ("InstallLocation", sz("C:\\Program Files\\Tool")),
+                        ("UninstallString", sz("\"C:\\Program Files\\Tool\\u.exe\"")),
+                    ],
+                ),
+                entry(
+                    Scope::Machine,
+                    RegView::Reg32,
+                    "Tool",
+                    &[
+                        ("DisplayName", sz("Tool")),
+                        ("InstallLocation", sz("C:\\Program Files (x86)\\Tool")),
+                        ("UninstallString", sz("\"C:\\Program Files (x86)\\Tool\\u.exe\"")),
+                    ],
+                ),
+            ],
+            vec![],
+        );
+        assert_eq!(inv.programs.len(), 2);
+        assert_ne!(inv.programs[0].id, inv.programs[1].id);
+        let locs: Vec<_> = inv.programs.iter().map(|p| p.install_location.clone().unwrap()).collect();
+        assert!(locs.contains(&"C:\\Program Files\\Tool".to_string()));
+        assert!(locs.contains(&"C:\\Program Files (x86)\\Tool".to_string()));
+        assert!(inv.programs.iter().all(|p| p.sources.len() == 1));
+    }
+
+    #[test]
+    fn same_product_code_with_different_commands_kept_separate() {
         let code = "{11111111-2222-3333-4444-555555555555}";
         let inv = build_inventory(
             vec![
@@ -277,7 +332,7 @@ pub(crate) mod tests {
                 entry(
                     Scope::Machine,
                     RegView::Reg32,
-                    "ToolAlias",
+                    code,
                     &[
                         ("DisplayName", sz("Tool")),
                         ("WindowsInstaller", RegValue::Dword(1)),
@@ -287,8 +342,41 @@ pub(crate) mod tests {
             ],
             vec![],
         );
+        assert_eq!(inv.programs.len(), 2);
+    }
+
+    #[test]
+    fn identical_mirrored_registration_is_merged() {
+        let vals = [
+            ("DisplayName", sz("Mirror")),
+            ("DisplayVersion", sz("1.0")),
+            ("InstallLocation", sz("C:\\Program Files\\Mirror\\")),
+            ("UninstallString", sz("\"C:\\Program Files\\Mirror\\u.exe\"")),
+        ];
+        let mut vals32 = vals.clone();
+        vals32[2] = ("InstallLocation", sz("c:\\program files\\mirror"));
+        let inv = build_inventory(
+            vec![
+                entry(Scope::Machine, RegView::Reg32, "Mirror", &vals32),
+                entry(Scope::Machine, RegView::Reg64, "Mirror", &vals),
+            ],
+            vec![],
+        );
         assert_eq!(inv.programs.len(), 1);
-        assert_eq!(inv.programs[0].product_code.as_deref(), Some(code));
         assert_eq!(inv.programs[0].sources.len(), 2);
+        assert_eq!(inv.programs[0].sources[0].view, RegView::Reg64);
+    }
+
+    #[test]
+    fn same_key_name_in_user_and_machine_scope_kept_separate() {
+        let vals = [("DisplayName", sz("Both"))];
+        let inv = build_inventory(
+            vec![
+                entry(Scope::Machine, RegView::Reg64, "Both", &vals),
+                entry(Scope::User, RegView::Shared, "Both", &vals),
+            ],
+            vec![],
+        );
+        assert_eq!(inv.programs.len(), 2);
     }
 }

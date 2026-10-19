@@ -4,10 +4,9 @@ use crate::launch::{run_uninstaller, LaunchError, TrackEvent};
 use crate::registry::WinReg;
 use crate::system::{msi_product_state, new_renames_under, pending_renames};
 use std::sync::atomic::AtomicBool;
-use sweep_core::api::RegRead;
 use sweep_core::evidence::EvidenceSnapshot;
 use sweep_core::launch::LaunchPlan;
-use sweep_core::outcome::{classify_exe, classify_msi, Event, Postconditions, UninstallState};
+use sweep_core::outcome::{classify_exe, classify_msi, entry_state, Event, Postconditions, UninstallState};
 
 fn step(st: &mut UninstallState, ev: Event, on_state: &mut impl FnMut(&UninstallState)) {
     if let Ok(next) = st.clone().next(ev) {
@@ -24,7 +23,7 @@ pub fn postconditions(
 ) -> Postconditions {
     let after = pending_renames();
     Postconditions {
-        entry_still_present: snap.uninstall_keys.iter().any(|k| WinReg.key_exists(k.root, k.view, &k.path)),
+        entry: entry_state(&WinReg, &snap.uninstall_keys),
         msi_state: if plan.is_msi { snap.product_code.as_deref().map(msi_product_state) } else { None },
         new_pending_renames: new_renames_under(before, &after, snap.install_dir.as_ref().ok()),
         tracking_incomplete,
