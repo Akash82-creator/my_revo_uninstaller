@@ -7,7 +7,7 @@ counts as **not run**.
 |---|---|---|
 | `2026-10-19-ci-real-apps.md` | Automated: real MSI (7-Zip), NSIS (Notepad++) and Inno (WinMerge) uninstalls on a disposable GitHub Windows VM | **Run 2 passed** (3/3, hardened selection). Run 1's Inno result is invalid. |
 | `<date>-vm-<build>.md` | Manual: interactive dialogs and UAC (`tests/vm/RUNBOOK.md`, cases R1–R12) | **not run yet** |
-| `<date>-reboot-<build>.md` | Manual: Windows Installer reboot outcomes, exit codes 3010 and 1641 | **not run yet**; no procedure written yet |
+| `2026-10-19-ci-real-apps.md`, Run 3 | Automated: Windows Installer restart outcomes using the project's test MSIs | **3010 passed**. 1641 can't come from Sweep (it passes `/norestart`). A suppressed ForceReboot returns **1604**, reported as Failed (proposed: "suspended until restart"). |
 
 ## Stage B gate
 Stage B (Sweep's own cleanup) stays **disabled** (`sweep_core::CLEANUP_ENABLED = false`).
@@ -17,4 +17,5 @@ shows it passed, in addition to Stage B's own safety requirements
 
 - [x] Real MSI/NSIS/Inno uninstalls on a disposable VM (automated, unattended): `2026-10-19-ci-real-apps.md`, Run 2
 - [ ] Interactive dialogs and UAC: standard user, other admin, consent, declined, per-user, elevated-Sweep refusal (R1–R12)
-- [ ] Reboot outcomes: 3010 (restart required) and 1641 (restart initiated)
+- [x] Windows Installer restart outcomes through Sweep: 3010 (Run 3). 1641 can't happen through Sweep.
+- [ ] Decide how 1604 ("suspended until restart") is reported; currently shown as Failed
