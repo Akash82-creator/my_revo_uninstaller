@@ -91,7 +91,26 @@ file. The next run's detail is recorded below.
 - **Coverage gaps:** the 7-Zip and Notepad++ scans each recorded one gap. Which location it was is not published as an annotation; it is in the run's `real-apps-results` artifact.
 - **Invariants:** they held in all six scans. Every Likely candidate had ownership evidence and no concerns, `C:\Windows` paths were Blocked, and cleanup was disabled.
 
+## Run 3: reboot test MSIs (PR #7 head `bbc3991`, 2026-10-20)
+- **Run:** https://github.com/Akash82-creator/my_revo_uninstaller/actions/runs/39398790810 (merged as `5f55808`)
+- **Apps:** the same three as run 2, plus the project's own reboot test MSIs from `tests/fixtures/msi`, hash-verified against `SHA256SUMS`.
+
+`test result: ok. 5 passed; 0 failed`. The three real apps gave the same results as run 2.
+
+| Fixture | msiexec exit (via Sweep, with `/norestart`) | Sweep outcome | After uninstall | Machine rebooted? |
+|---|---|---|---|---|
+| ScheduleReboot fixture | 3010 | **SucceededRebootRequired** ("restart required") | entry absent; MSI product not installed | no |
+| ForceReboot fixture | **1604** | **Failed (code 1604)** | entry absent; `MsiQueryProductState` reports not installed | no |
+
+**Findings**
+- **3010 handling works end to end.** A real Windows Installer restart request is reported as "Uninstaller finished; restart required", and the product is removed.
+- **Sweep never causes a reboot:** a forced restart didn't restart the machine, because Sweep always passes `/norestart`. So outcome **1641 (restart initiated) can't occur from a Sweep-launched MSI uninstall.** It is still classified correctly by a unit test.
+- **New: suppressing a `ForceReboot` makes msiexec return 1604** (`ERROR_INSTALL_SUSPEND`, "installation suspended, incomplete"). The uninstall is left suspended until the next restart, even though the registration and product state already read as removed.
+  - Sweep reports this as **Failed (1604)**. That's safe: the leftover scan doesn't start automatically and nothing reads as success.
+  - But it's **inaccurate**: the right wording is "uninstall suspended until restart".
+  - Proposed change, not made yet: map 1604 to an uncertain outcome with a "restart required to finish" message, still without an automatic scan.
+
 ## Not covered by these runs
 - Interactive uninstaller dialogs and **UAC** (standard user, other admin, consent): `tests/vm/RUNBOOK.md`, **not run yet**.
-- Reboot exit codes 3010/1641 from Windows Installer.
+- Restart outcomes from EXE (non-MSI) uninstallers, and a real reboot followed by checking Sweep's state afterwards.
 - Sweep's UI. These runs drive the same backend code the app uses, but not the Tauri front end.
