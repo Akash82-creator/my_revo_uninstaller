@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test fixture for Sweep Stage A reboot validation. Rebuild with ./build.sh (wixl). -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B1641}" Name="Sweep ForceReboot Fixture" Language="1033" Version="1.0.0" Manufacturer="Sweep Test Fixtures" UpgradeCode="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B1000}">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"/>
+    <Media Id="1" Cabinet="fixture.cab" EmbedCab="yes"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="SweepForceRebootFixture">
+          <Component Id="Payload" Guid="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B1001}" Win64="yes">
+            <File Id="PayloadTxt" Source="payload.txt" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Level="1"><ComponentRef Id="Payload"/></Feature>
+    <InstallExecuteSequence>
+      <!-- Uninstall only: force a restart. Without /norestart msiexec would
+           reboot and exit 1641; Sweep always passes /norestart
+           (REBOOT=ReallySuppress), which must turn this into 3010. -->
+      <ForceReboot Before="InstallFinalize">REMOVE="ALL"</ForceReboot>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

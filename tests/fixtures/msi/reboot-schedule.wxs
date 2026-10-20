@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test fixture for Sweep Stage A reboot validation. Rebuild with ./build.sh (wixl). -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B3010}" Name="Sweep ScheduleReboot Fixture" Language="1033" Version="1.0.0" Manufacturer="Sweep Test Fixtures" UpgradeCode="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B0000}">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"/>
+    <Media Id="1" Cabinet="fixture.cab" EmbedCab="yes"/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="SweepScheduleRebootFixture">
+          <Component Id="Payload" Guid="{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B0001}" Win64="yes">
+            <File Id="PayloadTxt" Source="payload.txt" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Main" Level="1"><ComponentRef Id="Payload"/></Feature>
+    <InstallExecuteSequence>
+      <!-- Uninstall only: request a restart (msiexec exit code 3010). -->
+      <ScheduleReboot After="InstallFinalize">REMOVE="ALL"</ScheduleReboot>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

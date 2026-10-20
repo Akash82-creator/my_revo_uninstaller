@@ -20,6 +20,7 @@ mod expect;
 
 use expect::{reg_ids, select, Expect, RegId};
 use sweep_core::model::Scope;
+use sweep_core::msi::MsiProductState;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -86,7 +87,23 @@ fn preinstall_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/real-apps/preinstall.json")
 }
 
-fn real_app_cycle(app: &str, expect: Expect, silent: &str) {
+type Check = fn(&Outcome, &EntryState, Option<MsiProductState>) -> Result<(), String>;
+
+/// Real uninstallers: confirmed success, registration gone, MSI product gone.
+fn standard_success(o: &Outcome, entry: &EntryState, msi: Option<MsiProductState>) -> Result<(), String> {
+    if !matches!(o, Outcome::Succeeded | Outcome::SucceededRebootRequired) {
+        return Err(format!("outcome {o:?}"));
+    }
+    if *entry != EntryState::Absent {
+        return Err(format!("Uninstall entry after uninstall: {entry:?}"));
+    }
+    if msi.is_some_and(|m| m != MsiProductState::NotInstalled) {
+        return Err(format!("MSI state after uninstall: {msi:?}"));
+    }
+    Ok(())
+}
+
+fn real_app_cycle(app: &str, expect: Expect, silent: &str, check: Check) {
     let expect_msi = expect.msi_product_code.is_some();
     let (entries, unreadable) = read_entries(&WinReg);
     let inv = build_inventory(entries, unreadable);
@@ -196,13 +213,8 @@ fn real_app_cycle(app: &str, expect: Expect, silent: &str) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{app}.json")), serde_json::to_string_pretty(&result).unwrap()).unwrap();
 
-    assert!(
-        matches!(outcome, Outcome::Succeeded | Outcome::SucceededRebootRequired),
-        "{app}: outcome {outcome:?} (tracking incomplete: {incomplete})"
-    );
-    assert_eq!(entry, EntryState::Absent, "{app}: Uninstall entry after uninstall");
-    if expect_msi {
-        assert_eq!(msi_state, Some(sweep_core::msi::MsiProductState::NotInstalled), "{app}: MSI state");
+    if let Err(e) = check(&outcome, &entry, msi_state) {
+        panic!("{app}: {e} (tracking incomplete: {incomplete})");
     }
 }
 
@@ -215,11 +227,9 @@ fn record_preinstall_inventory() {
     let p = preinstall_path();
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(&p, serde_json::to_string_pretty(&reg_ids(&inv)).unwrap()).unwrap();
-    for q in inv
-        .programs
-        .iter()
-        .filter(|q| ["7-Zip", "Notepad++", "Inno Setup", "WinMerge"].iter().any(|n| q.display_name.starts_with(n)))
-    {
+    for q in inv.programs.iter().filter(|q| {
+        ["7-Zip", "Notepad++", "Inno Setup", "WinMerge", "Sweep "].iter().any(|n| q.display_name.starts_with(n))
+    }) {
         println!("PREINSTALL {} v{:?} {:?} msi={}", q.display_name, q.version, q.scope, q.windows_installer);
     }
 }
@@ -234,7 +244,7 @@ fn msi_7zip() {
         // Read from the pinned 7z2408-x64.msi Property table.
         msi_product_code: Some("{23170F69-40C1-2702-2408-000001000000}"),
     };
-    real_app_cycle("7zip-msi", e, "/qn");
+    real_app_cycle("7zip-msi", e, "/qn", standard_success);
 }
 
 #[test]
@@ -243,7 +253,7 @@ fn nsis_notepadplusplus() {
     // NSIS uninstallers copy themselves to %TEMP% and relaunch: exercises
     // descendant tracking against a real vendor uninstaller.
     let e = Expect { name_prefix: "Notepad++", version: "8.7.1", scope: Scope::Machine, msi_product_code: None };
-    real_app_cycle("notepadpp-nsis", e, "/S");
+    real_app_cycle("notepadpp-nsis", e, "/S", standard_success);
 }
 
 #[test]
@@ -253,5 +263,48 @@ fn inno_winmerge() {
     // because the runner image already ships Inno Setup itself, whose
     // registration an Inno Setup install would overwrite in place.
     let e = Expect { name_prefix: "WinMerge", version: "2.16.44", scope: Scope::Machine, msi_product_code: None };
-    real_app_cycle("winmerge-inno", e, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART");
+    real_app_cycle("winmerge-inno", e, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", standard_success);
+}
+
+// ---------------------------------------------------------------------------
+// Reboot outcomes, using the project's own test MSIs (tests/fixtures/msi).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "real-apps workflow only: needs the reboot fixture MSIs to be installed first"]
+fn msi_schedule_reboot_fixture() {
+    // ScheduleReboot on uninstall: msiexec must exit 3010 and Sweep must report
+    // "succeeded, restart required", with the product actually removed.
+    let e = Expect {
+        name_prefix: "Sweep ScheduleReboot Fixture",
+        version: "1.0.0",
+        scope: Scope::Machine,
+        msi_product_code: Some("{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B3010}"),
+    };
+    real_app_cycle("msi-schedule-reboot", e, "/qn", |o, entry, msi| {
+        if *o != Outcome::SucceededRebootRequired {
+            return Err(format!("expected SucceededRebootRequired (3010), got {o:?}"));
+        }
+        standard_success(o, entry, msi)
+    });
+}
+
+#[test]
+#[ignore = "real-apps workflow only: needs the reboot fixture MSIs to be installed first"]
+fn msi_force_reboot_fixture() {
+    // ForceReboot on uninstall. Run without /norestart, msiexec would reboot
+    // the machine and exit 1641. Sweep always passes /norestart
+    // (REBOOT=ReallySuppress), so Sweep must never cause a reboot and must not
+    // report a confirmed plain success. The exact outcome is recorded.
+    let e = Expect {
+        name_prefix: "Sweep ForceReboot Fixture",
+        version: "1.0.0",
+        scope: Scope::Machine,
+        msi_product_code: Some("{5E1F0A11-7C2B-4C55-9D7B-3F0A2E6B1641}"),
+    };
+    real_app_cycle("msi-force-reboot", e, "/qn", |o, _entry, _msi| match o {
+        Outcome::RebootInitiated => Err("Sweep's msiexec launch initiated a reboot (1641)".into()),
+        Outcome::Succeeded => Err("a forced reboot was reported as plain success".into()),
+        _ => Ok(()),
+    });
 }

@@ -14,6 +14,7 @@ on:
   pull_request:
     paths:
       - "crates/**"
+      - "tests/fixtures/**"
       - ".github/workflows/real-apps.yml"
 
 jobs:
@@ -72,6 +73,15 @@ jobs:
           Invoke-Installer '7-Zip MSI' 'msiexec.exe' @('/i', "`"$PWD\installers\7z2408-x64.msi`"", '/qn', '/norestart') @(0)
           Invoke-Installer 'Notepad++ (NSIS)' "$PWD\installers\npp.8.7.1.Installer.x64.exe" @('/S') @(0)
           Invoke-Installer 'WinMerge (Inno)' "$PWD\installers\WinMerge-2.16.44-x64-Setup.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS') @(0)
+
+          # Reboot test MSIs built from tests/fixtures/msi/*.wxs (see build.sh).
+          foreach ($line in Get-Content tests/fixtures/msi/SHA256SUMS) {
+            $sha, $file = $line -split '\s+', 2
+            $h = (Get-FileHash "tests/fixtures/msi/$file" -Algorithm SHA256).Hash.ToLower()
+            if ($h -ne $sha) { throw "fixture hash mismatch for $file : $h" }
+          }
+          Invoke-Installer 'ScheduleReboot fixture MSI' 'msiexec.exe' @('/i', "`"$PWD\tests\fixtures\msi\reboot-schedule.msi`"", '/qn', '/norestart') @(0)
+          Invoke-Installer 'ForceReboot fixture MSI' 'msiexec.exe' @('/i', "`"$PWD\tests\fixtures\msi\reboot-force.msi`"", '/qn', '/norestart') @(0)
           Start-Sleep -Seconds 5
       - name: Uninstall through Sweep and scan (read-only)
         shell: pwsh
